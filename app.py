@@ -17,43 +17,42 @@ warnings.simplefilter(action='ignore', category=FutureWarning)
 # 0. 基礎爬蟲 (OpenAPI 防止封鎖)
 # ==========================================
 @st.cache_data(ttl=86400)
+# [V6.0 積木 1] 強化版產業抓取器 (加入全產業結構備援)
+@st.cache_data(ttl=86400)
 def fetch_twse_isin():
     data = []
-    # 抓取上市 (TWSE)
     try:
-        res_l = requests.get("https://openapi.twse.com.tw/v1/opendata/t187ap03_L", timeout=10)
+        res_l = requests.get("https://openapi.twse.com.tw/v1/opendata/t187ap03_L", timeout=5)
         if res_l.status_code == 200:
             for item in res_l.json():
                 if len(item.get("公司代號", "")) == 4:
-                    data.append({
-                        "Code": item["公司代號"], "Name": item["公司名稱"],
-                        "Industry": item["產業別"], "Ticker": f"{item['公司代號']}.TW"
-                    })
+                    data.append({"Code": item["公司代號"], "Name": item["公司名稱"], "Industry": item["產業別"], "Ticker": f"{item['公司代號']}.TW"})
     except: pass
 
-    # 抓取上櫃 (TPEx)
     try:
-        res_o = requests.get("https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap03_O", timeout=10)
+        res_o = requests.get("https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap03_O", timeout=5)
         if res_o.status_code == 200:
             for item in res_o.json():
                 if len(item.get("公司代號", "")) == 4:
-                    data.append({
-                        "Code": item["公司代號"], "Name": item["公司名稱"],
-                        "Industry": item["產業別"], "Ticker": f"{item['公司代號']}.TWO"
-                    })
+                    data.append({"Code": item["公司代號"], "Name": item["公司名稱"], "Industry": item["產業別"], "Ticker": f"{item['公司代號']}.TWO"})
     except: pass
 
     df = pd.DataFrame(data)
-    if df.empty:
-        backup = [
-            {"Code": "2330", "Name": "台積電", "Industry": "半導體業", "Ticker": "2330.TW"},
-            {"Code": "2317", "Name": "鴻海", "Industry": "其他電子業", "Ticker": "2317.TW"},
-            {"Code": "2454", "Name": "聯發科", "Industry": "半導體業", "Ticker": "2454.TW"}
+    
+    # 若 OpenAPI 雙雙陣亡，啟用「完整產業地圖」備援機制
+    if df.empty or len(df) < 100:
+        st.toast("⚠️ 政府 OpenAPI 連線不穩，已啟動離線產業地圖。", icon="📡")
+        # 建立涵蓋所有主要產業的基礎清單 (簡化版示範)
+        backup_list = [
+            ("2330", "台積電", "半導體業"), ("2454", "聯發科", "半導體業"),
+            ("2317", "鴻海", "其他電子業"), ("2382", "廣達", "電腦及週邊設備業"),
+            ("3017", "奇鋐", "電腦及週邊設備業"), ("1519", "華城", "電機機械"),
+            ("2881", "富邦金", "金融保險業"), ("2882", "國泰金", "金融保險業"),
+            ("2002", "中鋼", "鋼鐵工業"), ("2603", "長榮", "航運業")
         ]
-        df = pd.DataFrame(backup)
+        df = pd.DataFrame([{"Code": c, "Name": n, "Industry": i, "Ticker": f"{c}.TW"} for c, n, i in backup_list])
     
     return df[df['Industry'] != '']
-
 def get_tw_yahoo_cum_growth(symbol):
     headers = {'User-Agent': 'Mozilla/5.0'}
     try:
@@ -69,6 +68,42 @@ def get_tw_yahoo_cum_growth(symbol):
         return None
     except: return None
 
+# [V6.0 積木 2] 時點財務過濾器 (Point-in-Time Engine)
+def get_pit_financials(stock, target_date):
+    """
+    輸入目標日期，回傳該日期當下「最新已公布」的財務數據。
+    排除未來數據 (Look-ahead bias)。
+    """
+    try:
+        # 將目標日期轉換為 pandas datetime
+        target_dt = pd.to_datetime(target_date).tz_localize(None)
+        
+        q_fin = stock.quarterly_financials.T
+        if q_fin.empty: return None, None
+        
+        # 統一處理時區，確保能比對
+        q_fin.index = pd.to_datetime(q_fin.index).tz_localize(None)
+        
+        # 核心邏輯：財報公布通常有延遲 (約 45 天)。
+        # 為了嚴謹回測，我們假設「財報結算日 + 45天」才是市場真正看到數據的日子。
+        # 篩選出「公布日」早於「我們回測目標日」的財報。
+        available_reports = q_fin[q_fin.index + pd.Timedelta(days=45) <= target_dt]
+        
+        if available_reports.empty:
+            return None, None
+            
+        # 取得當時最新的一季數據
+        latest_pit_report = available_reports.iloc[0]
+        
+        # 取得當時的近四季 (TTM) EPS 用於計算 P/E
+        pit_eps_ttm = available_reports['Basic EPS'].head(4).sum() if 'Basic EPS' in available_reports.columns else 0
+        
+        # 取得當時最新一季的 EBITDA 用於後續計算
+        pit_ebitda = latest_pit_report.get('EBITDA', latest_pit_report.get('EBIT', 0))
+        
+        return pit_eps_ttm, pit_ebitda
+    except Exception as e:
+        return None, None
 # ==========================================
 # 1. 歷史區間計算 (完整還原 V5.0)
 # ==========================================
@@ -243,90 +278,100 @@ def compile_stock_data(symbol, industry_name, stock, info, price, real_growth, q
 # ==========================================
 st.title("V5.5 Eric Chi估值模型")
 
-tab1, tab2, tab3 = st.tabs(["產業掃描", "單股查詢", "歷史回測"])
+tab1, tab2, tab3 = st.tabs(["全產業掃描", "單股查詢", "歷史回測"])
 
-# --- Tab 1: 產業掃描 ---
+# --- Tab 1: 產業掃描 (V4.6 全掃描邏輯回歸) ---
 with tab1:
     with st.spinner("載入產業清單中..."):
         df_all = fetch_twse_isin()
         
     if not df_all.empty:
         valid_industries = sorted([i for i in df_all['Industry'].unique()])
-        selected_inds = st.multiselect("選擇掃描產業 (可多選):", valid_industries, default=["半導體業"])
+        st.info(f"系統共偵測到 {len(valid_industries)} 個產業。全市場掃描將動態印出各產業 Top 6 企業，整體耗時較長，請保持網頁開啟。")
         
-        if st.button("執行掃描", type="primary") and selected_inds:
-            pb = st.progress(0); status_text = st.empty()
-            targets = []
+        if st.button("執行全產業掃描", type="primary"):
+            pb = st.progress(0)
+            status_text = st.empty()
             
-            # 市值初篩
-            for idx, ind in enumerate(selected_inds):
-                status_text.text(f"篩選 [{ind}] 市值前 50%...")
+            # 建立一個容器，用來動態裝載印出來的各產業表格
+            results_container = st.container()
+            
+            total_inds = len(valid_industries)
+            cols_display = ['股票代碼', '名稱', '現價', '營收成長率', '營業利益率', '淨利率', 
+                            '預估EPS', 'P/E (TTM)', 'P/B (Lag)', 'P/S (Lag)', 'EV/EBITDA',
+                            '預估範圍P/E', '預估範圍P/B', '預估範圍P/S', '預估範圍EV/EBITDA',
+                            'DCF/DDM合理價', '狀態', 'vs產業PE', '選股邏輯']
+            
+            for idx, ind in enumerate(valid_industries):
+                status_text.text(f"進度: {idx+1}/{total_inds} | 正在精算 [{ind}]...")
+                
                 tickers = df_all[df_all["Industry"] == ind]["Ticker"].tolist()
+                if not tickers:
+                    pb.progress((idx + 1) / total_inds)
+                    continue
+                    
+                # 市值初篩 (保留前 50% 加快運算速度)
                 caps = []
                 for t in tickers:
                     try: caps.append((t, yf.Ticker(t).fast_info['market_cap']))
                     except: pass
                 caps.sort(key=lambda x: x[1], reverse=True)
-                targets.extend([(x[0], ind) for x in caps[:max(len(caps)//2, 1)]])
-                pb.progress((idx + 1) / len(selected_inds) * 0.1)
-
-            results = []; ind_pes = {ind: [] for ind in selected_inds}; raw_data = []
-            status_text.text(f"計算 {len(targets)} 檔股票模型中...")
-            
-            for i, (sym, ind) in enumerate(targets):
-                try:
-                    stock = yf.Ticker(sym); info = stock.info
-                    price = info.get('currentPrice') or info.get('previousClose')
-                    if not price: continue
-                    
-                    real_g = get_tw_yahoo_cum_growth(sym) or info.get('revenueGrowth', 0.0)
-                    
-                    q_fin = stock.quarterly_financials
-                    qoq_g = (q_fin.loc['Total Revenue'].iloc[0] - q_fin.loc['Total Revenue'].iloc[1]) / q_fin.loc['Total Revenue'].iloc[1] if not q_fin.empty and len(q_fin.columns) >= 2 else 0
-                    
-                    hist = stock.history(period="10y")
-                    pe_rng, pb_rng, ps_rng, ev_rng, avg_pe = get_historical_metrics(stock, hist)
-                    
-                    eps = info.get('trailingEps', 0)
-                    cur_pe = price / eps if eps > 0 else 0
-                    if 0 < cur_pe < 120: ind_pes[ind].append(cur_pe)
-                    
-                    cur_ev = info.get('enterpriseToEbitda', 0)
-                    if not cur_ev:
-                        mcap = price * info.get('sharesOutstanding', 1)
-                        cur_ev = (mcap + info.get('totalDebt', 0) - info.get('totalCash', 0)) / info.get('ebitda', 1)
+                targets = [x[0] for x in caps[:max(len(caps)//2, 1)]]
+                
+                ind_pes = []
+                raw_data = []
+                
+                for sym in targets:
+                    try:
+                        stock = yf.Ticker(sym); info = stock.info
+                        price = info.get('currentPrice') or info.get('previousClose')
+                        if not price: continue
                         
-                    is_fin = any(x in ind for x in ["金融", "保險"])
-                    intrinsic, g_used, wacc, roic = get_3_stage_valuation(stock, is_fin, real_g)
-                    upside = (intrinsic - price) / price if intrinsic > 0 else -1
+                        real_g = get_tw_yahoo_cum_growth(sym) or info.get('revenueGrowth', 0.0)
+                        
+                        q_fin = stock.quarterly_financials
+                        qoq_g = (q_fin.loc['Total Revenue'].iloc[0] - q_fin.loc['Total Revenue'].iloc[1]) / q_fin.loc['Total Revenue'].iloc[1] if not q_fin.empty and len(q_fin.columns) >= 2 else 0
+                        
+                        hist = stock.history(period="10y")
+                        pe_rng, pb_rng, ps_rng, ev_rng, avg_pe = get_historical_metrics(stock, hist)
+                        
+                        eps = info.get('trailingEps', 0)
+                        cur_pe = price / eps if eps > 0 else 0
+                        if 0 < cur_pe < 120: ind_pes.append(cur_pe)
+                        
+                        cur_ev = info.get('enterpriseToEbitda', 0)
+                        if not cur_ev:
+                            mcap = price * info.get('sharesOutstanding', 1)
+                            cur_ev = (mcap + info.get('totalDebt', 0) - info.get('totalCash', 0)) / info.get('ebitda', 1)
+                            
+                        is_fin = any(x in ind for x in ["金融", "保險"])
+                        intrinsic, g_used, wacc, roic = get_3_stage_valuation(stock, is_fin, real_g)
+                        upside = (intrinsic - price) / price if intrinsic > 0 else -1
+                        
+                        raw_data.append((sym, ind, stock, info, price, real_g, qoq_g, wacc, roic, pe_rng, pb_rng, ps_rng, ev_rng, avg_pe, cur_pe, cur_ev, intrinsic, upside, eps, is_fin))
+                    except: pass
+                
+                # 計算該產業中位數PE
+                pe_med = np.median(ind_pes) if ind_pes else 22.0
+                
+                # 彙整該產業所有股票評分
+                ind_results = []
+                for d in raw_data:
+                    ind_results.append(compile_stock_data(*d[:19], pe_med, d[19]))
                     
-                    raw_data.append((sym, ind, stock, info, price, real_g, qoq_g, wacc, roic, pe_rng, pb_rng, ps_rng, ev_rng, avg_pe, cur_pe, cur_ev, intrinsic, upside, eps, is_fin))
-                except: pass
-                pb.progress(0.1 + ((i + 1) / len(targets) * 0.9))
-
-            pe_meds = {ind: (np.median(pes) if pes else 22.0) for ind, pes in ind_pes.items()}
-            for d in raw_data:
-                results.append(compile_stock_data(*d[:19], pe_meds[d[1]], d[19]))
-            
-            status_text.text("分析完成！")
-            pb.progress(1.0)
-            
-            if results:
-                df_res = pd.DataFrame(results)
-                cols_display = ['股票代碼', '名稱', '現價', '營收成長率', '營業利益率', '淨利率', 
-                                '預估EPS', 'P/E (TTM)', 'P/B (Lag)', 'P/S (Lag)', 'EV/EBITDA',
-                                '預估範圍P/E', '預估範圍P/B', '預估範圍P/S', '預估範圍EV/EBITDA',
-                                'DCF/DDM合理價', '狀態', 'vs產業PE', '選股邏輯']
-                
-                st.subheader("跨產業綜合排行榜")
-                st.dataframe(df_res.sort_values(by='Total_Score', ascending=False).head(10)[['產業別'] + cols_display], use_container_width=True)
-                
-                st.subheader("各產業排名")
-                for ind in selected_inds:
-                    df_ind = df_res[df_res['產業別'] == ind].sort_values(by='Total_Score', ascending=False)
-                    if not df_ind.empty:
-                        st.markdown(f"**{ind}**")
+                # 排序並印出 Top 6
+                if ind_results:
+                    df_res = pd.DataFrame(ind_results)
+                    df_ind = df_res.sort_values(by='Total_Score', ascending=False).head(6)
+                    
+                    # 將結果即時繪製到畫面上，讓使用者不需要乾等
+                    with results_container:
+                        st.markdown(f"### 🏆 {ind} (精選 Top 6)")
                         st.dataframe(df_ind[cols_display], use_container_width=True)
+                        
+                pb.progress((idx + 1) / total_inds)
+                
+            status_text.text("✅ 全市場產業掃描完成！")
 
 # --- Tab 2: 單股查詢 ---
 with tab2:
