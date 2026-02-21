@@ -10,7 +10,7 @@ import warnings
 # ==========================================
 # 頁面與基本設定
 # ==========================================
-st.set_page_config(page_title="V6.4 Eric Chi估值模型", page_icon="📊", layout="wide")
+st.set_page_config(page_title="V6.5 Eric Chi估值模型", page_icon="📊", layout="wide")
 warnings.simplefilter(action='ignore', category=FutureWarning)
 
 # ==========================================
@@ -41,17 +41,24 @@ def get_growth_data(stock, symbol):
     return stock.info.get('revenueGrowth', 0.0)
 
 # ==========================================
-# 1. 歷史區間計算 (V6.4 修復解包錯誤)
+# 1. 歷史區間計算 (V6.5 強化髒資料處理)
 # ==========================================
 def get_historical_metrics(stock, hist_data):
     try:
         if hist_data.empty: return ["-", "-", "-", "-"], 0
-        hist_data.index = hist_data.index.tz_localize(None)
+        hist_data.index = pd.to_datetime(hist_data.index).tz_localize(None)
+        hist_data = hist_data.sort_index() # 確保時間軸正向排序，避免對齊崩潰
         
         fin = stock.quarterly_financials.T
         bs = stock.quarterly_balance_sheet.T
-        if fin.empty or bs.empty: return ["-", "-", "-", "-"], 0
         
+        # 備援：若無季報則改用年報
+        if fin.empty or bs.empty:
+            fin = stock.financials.T
+            bs = stock.balance_sheet.T
+            if fin.empty or bs.empty:
+                return ["-", "-", "-", "-"], 0
+                
         fin.index = pd.to_datetime(fin.index).tz_localize(None)
         bs.index = pd.to_datetime(bs.index).tz_localize(None)
         
@@ -59,37 +66,54 @@ def get_historical_metrics(stock, hist_data):
         shares = stock.info.get('sharesOutstanding', 1)
         
         for rpt_date in fin.index:
-            if rpt_date not in hist_data.index:
-                nearest_idx = hist_data.index.get_indexer([rpt_date], method='nearest')[0]
-                if nearest_idx == -1: continue
-                price = hist_data.iloc[nearest_idx]['Close']
-            else:
-                price = hist_data.loc[rpt_date]['Close']
-            
-            if rpt_date in bs.index:
-                total_debt = bs.loc[rpt_date].get('Total Debt', 0)
-                cash = bs.loc[rpt_date].get('Cash And Cash Equivalents', 0)
-                ev = (price * shares) + total_debt - cash
-                ebitda = fin.loc[rpt_date].get('EBITDA', fin.loc[rpt_date].get('EBIT', 0))
-                if ebitda > 0:
-                    ratio = ev / (ebitda * 4) 
-                    if 0 < ratio < 100: evebitda_vals.append(ratio)
-            
-            eps = fin.loc[rpt_date].get('Basic EPS', 0)
-            if eps > 0: pe_vals.append(price / (eps * 4))
-            
-            rev = fin.loc[rpt_date].get('Total Revenue', 0)
-            if rev > 0: ps_vals.append(price / ((rev/shares) * 4))
+            try:
+                if rpt_date not in hist_data.index:
+                    nearest_idx = hist_data.index.get_indexer([rpt_date], method='nearest')[0]
+                    if nearest_idx == -1: continue
+                    price = float(hist_data.iloc[nearest_idx]['Close'])
+                else:
+                    price = float(hist_data.loc[rpt_date]['Close'])
                 
-            bv = bs.loc[rpt_date].get('Stockholders Equity', 0)
-            if bv > 0: pb_vals.append(price / (bv/shares))
+                # 處理重編財報導致的重複日期問題
+                if isinstance(price, pd.Series): price = price.iloc[0]
+                
+                if rpt_date in bs.index:
+                    bs_row = bs.loc[rpt_date]
+                    if isinstance(bs_row, pd.DataFrame): bs_row = bs_row.iloc[0]
+                    
+                    total_debt = float(bs_row.get('Total Debt', 0) or 0)
+                    cash = float(bs_row.get('Cash And Cash Equivalents', 0) or 0)
+                    ev = (price * shares) + total_debt - cash
+                    
+                    fin_row = fin.loc[rpt_date]
+                    if isinstance(fin_row, pd.DataFrame): fin_row = fin_row.iloc[0]
+                    
+                    ebitda = float(fin_row.get('EBITDA', fin_row.get('EBIT', 0)) or 0)
+                    if ebitda > 0:
+                        ratio = ev / (ebitda * 4) 
+                        if 0 < ratio < 100: evebitda_vals.append(ratio)
+                
+                fin_row_2 = fin.loc[rpt_date]
+                if isinstance(fin_row_2, pd.DataFrame): fin_row_2 = fin_row_2.iloc[0]
+                
+                eps = float(fin_row_2.get('Basic EPS', 0) or 0)
+                if eps > 0: pe_vals.append(price / (eps * 4))
+                
+                rev = float(fin_row_2.get('Total Revenue', 0) or 0)
+                if rev > 0: ps_vals.append(price / ((rev/shares) * 4))
+                    
+                if rpt_date in bs.index:
+                    bv = float(bs_row.get('Stockholders Equity', 0) or 0)
+                    if bv > 0: pb_vals.append(price / (bv/shares))
+            except:
+                continue # 單一日期計算失敗不影響整體區間
                 
         def fmt_rng(vals):
-            clean = [v for v in vals if 0 < v < 150]
+            clean = [v for v in vals if not pd.isna(v) and 0 < v < 150]
             return f"{min(clean):.1f}-{max(clean):.1f}" if clean else "-"
             
-        # 修正點：將 4 個區間包成一個 list 回傳，確保外部只解包出 2 個變數
-        return [fmt_rng(pe_vals), fmt_rng(pb_vals), fmt_rng(ps_vals), fmt_rng(evebitda_vals)], (np.mean(pe_vals) if pe_vals else 0)
+        avg_pe = np.mean([v for v in pe_vals if not pd.isna(v) and 0 < v < 150]) if pe_vals else 0
+        return [fmt_rng(pe_vals), fmt_rng(pb_vals), fmt_rng(ps_vals), fmt_rng(evebitda_vals)], avg_pe
     except: return ["-", "-", "-", "-"], 0
 
 # ==========================================
@@ -273,7 +297,7 @@ def run_pit_backtest(sym, stock, target_date, is_finance):
 # ==========================================
 # UI 介面
 # ==========================================
-st.title("V6.4 Eric Chi估值模型")
+st.title("V6.5 Eric Chi估值模型")
 tab1, tab2, tab3 = st.tabs(["全產業掃描", "單股查詢", "真·時光機回測"])
 
 # --- Tab 1: 全產業掃描 ---
@@ -298,13 +322,19 @@ with tab1:
                 caps = []
                 for t in tickers:
                     try:
-                        mcap = yf.Ticker(t).fast_info.get('market_cap')
+                        tk = yf.Ticker(t)
+                        mcap = tk.fast_info.get('marketCap') or tk.fast_info.get('market_cap')
+                        if not mcap: mcap = tk.info.get('marketCap', 0)
                         if mcap and float(mcap) > 0: 
                             caps.append((t, float(mcap)))
                     except: pass
                 
-                caps.sort(key=lambda x: x[1], reverse=True)
-                targets = [x[0] for x in caps[:max(len(caps)//2, 1)]]
+                # V6.5 安全過濾機制：如果完全抓不到市值，就不要跳過，改掃描名單前 15 檔
+                if caps:
+                    caps.sort(key=lambda x: x[1], reverse=True)
+                    targets = [x[0] for x in caps[:max(len(caps)//2, 1)]]
+                else:
+                    targets = tickers[:15]
                 
                 ind_pes = []; raw_data = []
                 for sym in targets:
