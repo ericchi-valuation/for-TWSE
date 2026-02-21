@@ -10,14 +10,15 @@ import warnings
 # ==========================================
 # 頁面與基本設定
 # ==========================================
-st.set_page_config(page_title="V6.0 Eric Chi估值模型", page_icon="📊", layout="wide")
+st.set_page_config(page_title="V6.1 Eric Chi估值模型", page_icon="📊", layout="wide")
 warnings.simplefilter(action='ignore', category=FutureWarning)
 
 # ==========================================
-# 0. 基礎爬蟲 (V6.0 修正版：防封鎖 + 27產業雙引擎)
+# 0. 基礎爬蟲 (函數更名以強制清除舊的錯誤快取)
 # ==========================================
-@st.cache_data(ttl=86400)
-def fetch_twse_isin():
+@st.cache_data(ttl=86400, show_spinner=False)
+def fetch_industry_list_v6():
+    """絕對乾淨的資料抓取層，內部絕對不可包含任何 st. 語法"""
     data = []
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
     
@@ -40,10 +41,10 @@ def fetch_twse_isin():
                         if industry:
                             ticker = f"{code}.TW" if mode == 2 else f"{code}.TWO"
                             data.append({"Code": code, "Name": name, "Industry": industry, "Ticker": ticker})
-        if len(data) > 100: return pd.DataFrame(data)
+        if len(data) > 100: return pd.DataFrame(data).drop_duplicates(subset=['Code'])
     except: pass
 
-    # 引擎 2: OpenAPI 備援 (若引擎 1 被擋)
+    # 引擎 2: OpenAPI 備援
     try:
         res_l = requests.get("https://openapi.twse.com.tw/v1/opendata/t187ap03_L", timeout=10)
         if res_l.status_code == 200:
@@ -58,7 +59,7 @@ def fetch_twse_isin():
         if len(data) > 100: return pd.DataFrame(data).drop_duplicates(subset=['Code'])
     except: pass
 
-    return pd.DataFrame() # 全失敗則回傳空表交由 UI 處理
+    return pd.DataFrame() 
 
 def get_tw_yahoo_cum_growth(symbol):
     headers = {'User-Agent': 'Mozilla/5.0'}
@@ -76,7 +77,7 @@ def get_tw_yahoo_cum_growth(symbol):
     except: return None
 
 # ==========================================
-# 1. 歷史區間計算 (維持 V5.5)
+# 1. 歷史區間計算
 # ==========================================
 def get_historical_metrics(stock, hist_data):
     try:
@@ -125,7 +126,7 @@ def get_historical_metrics(stock, hist_data):
     except: return "-", "-", "-", "-", 0
 
 # ==========================================
-# 2. 估值核心 (維持 V5.5)
+# 2. 估值核心
 # ==========================================
 def get_3_stage_valuation(stock, is_finance, real_growth):
     try:
@@ -160,7 +161,7 @@ def get_3_stage_valuation(stock, is_finance, real_growth):
     except: return 0, 0, 0.1, 0
 
 # ==========================================
-# 3. 評分邏輯 (維持 V5.5)
+# 3. 評分邏輯
 # ==========================================
 def calculate_scores(info, financials, growth_rate, qoq_growth, valuation_upside, cur_pe, cur_ev_ebitda, hist_avg_pe, industry_pe_median, wacc, roic):
     scores = {'Q': 0, 'V': 0, 'G': 0, 'Total': 0, 'Msg': []}
@@ -211,20 +212,17 @@ def compile_stock_data(symbol, ind, stock, info, price, real_g, qoq_g, wacc, roi
     }
 
 # ==========================================
-# 4. V6.0 時點回測引擎 (Point-in-Time Engine)
+# 4. 時點回測引擎 (Point-in-Time Engine)
 # ==========================================
 def run_pit_backtest(sym, stock, target_date, is_finance):
-    """V6.0 真·時光機引擎：過濾未來數據，重建當時財報與得分"""
     try:
         target_dt = pd.to_datetime(target_date).tz_localize(None)
         hist = stock.history(start=target_dt - pd.Timedelta(days=3650), end=datetime.today())
         if hist.empty or hist[hist.index >= target_dt].empty: return None
 
-        # 1. 取得當時進場價與至今現價
         entry_price = hist[hist.index >= target_dt]['Close'].iloc[0]
         current_price = hist['Close'].iloc[-1]
 
-        # 2. 獲取並過濾歷史季報 (假設 45 天延遲發布，避免前瞻偏差)
         q_fin = stock.quarterly_financials.T
         q_bs = stock.quarterly_balance_sheet.T
         if q_fin.empty or q_bs.empty: return None
@@ -233,11 +231,9 @@ def run_pit_backtest(sym, stock, target_date, is_finance):
         q_bs.index = pd.to_datetime(q_bs.index).tz_localize(None)
         
         valid_dates = q_fin.index[q_fin.index + pd.Timedelta(days=45) <= target_dt]
-        if len(valid_dates) < 4: return None # 歷史數據不足四季
+        if len(valid_dates) < 4: return None
 
         latest_date = valid_dates[0]
-        
-        # 3. 重建當時的財務指標 (PIT Metrics)
         eps_ttm = q_fin.loc[valid_dates[:4], 'Basic EPS'].sum() if 'Basic EPS' in q_fin.columns else 0
         rev_ttm = q_fin.loc[valid_dates[:4], 'Total Revenue'].sum() if 'Total Revenue' in q_fin.columns else 0
         prev_rev_ttm = q_fin.loc[valid_dates[4:8], 'Total Revenue'].sum() if 'Total Revenue' in q_fin.columns and len(valid_dates) >= 8 else 0
@@ -255,7 +251,6 @@ def run_pit_backtest(sym, stock, target_date, is_finance):
         cur_pe = entry_price / eps_ttm if eps_ttm > 0 else 0
         cur_ev_ebitda = ((entry_price * shares) + debt - cash) / (ebitda * 4) if ebitda > 0 else 0
 
-        # 4. 重建當時的 DCF 估值
         beta = stock.info.get('beta', 1.0)
         ke = max(0.035 + beta * 0.06, 0.07)
         invested_capital = equity + debt - cash
@@ -275,7 +270,6 @@ def run_pit_backtest(sym, stock, target_date, is_finance):
 
         upside = (intrinsic - entry_price) / entry_price if intrinsic > 0 else -1
 
-        # 5. 計算當時的歷史 PE 平均
         pe_vals = []
         for d in valid_dates[:20]:
             try:
@@ -285,11 +279,9 @@ def run_pit_backtest(sym, stock, target_date, is_finance):
             except: pass
         avg_pe = np.mean(pe_vals) if pe_vals else 0
 
-        # 6. 生成當時的評分 (Mock 財報格式以符合函數)
         mock_fin = pd.DataFrame({'EBIT': [ebit], 'Interest Expense': [abs(q_fin.loc[latest_date].get('Interest Expense', ebit*0.1))]})
         scores = calculate_scores(stock.info, mock_fin, real_growth, qoq_growth, upside, cur_pe, cur_ev_ebitda, avg_pe, 22.0, wacc, roic)
 
-        # 7. 計算後續真實報酬
         dates = hist[hist.index >= target_dt].index
         def get_ret(days):
             td = dates[0] + pd.Timedelta(days=days)
@@ -312,13 +304,16 @@ def run_pit_backtest(sym, stock, target_date, is_finance):
 # ==========================================
 # UI 介面
 # ==========================================
-st.title("V6.0 Eric Chi估值模型 (時點回測引擎)")
+st.title("V6.1 Eric Chi估值模型")
 tab1, tab2, tab3 = st.tabs(["全產業掃描", "單股查詢", "真·時光機回測"])
 
 # --- Tab 1: 全產業掃描 ---
 with tab1:
-    with st.spinner("載入產業清單中..."): df_all = fetch_twse_isin()
-    if df_all.empty: st.error("❌ 無法連線至證交所，請稍後再試或檢查網路。")
+    with st.spinner("載入產業清單中..."):
+        df_all = fetch_industry_list_v6()
+        
+    if df_all.empty:
+        st.error("❌ 無法連線至證交所抓取產業清單。這通常是因為 Streamlit 雲端主機 IP 遭到台灣證交所防火牆阻擋，請稍後再試。")
     else:
         valid_industries = sorted([i for i in df_all['Industry'].unique()])
         st.info(f"偵測到 {len(valid_industries)} 個產業。掃描將動態印出各產業 Top 6，請保持網頁開啟。")
@@ -381,13 +376,13 @@ with tab2:
                     stock = yf.Ticker(sym); info = stock.info
                     price = info.get('currentPrice') or info.get('previousClose')
                     real_g = get_tw_yahoo_cum_growth(sym) or info.get('revenueGrowth', 0.0)
-                    ranges, avg_pe = get_historical_metrics(stock, stock.history(period="10y"))
+                    pe_rng, pb_rng, ps_rng, ev_rng, avg_pe = get_historical_metrics(stock, stock.history(period="10y"))
                     eps = info.get('trailingEps', 0); cur_pe = price/eps if eps>0 else 0
                     cur_ev = info.get('enterpriseToEbitda', 0)
                     is_fin = "Financial" in info.get('sector', '')
                     intrinsic, g_used, wacc, roic = get_3_stage_valuation(stock, is_fin, real_g)
                     upside = (intrinsic - price) / price if intrinsic > 0 else -1
-                    data = compile_stock_data(sym, info.get('industry', 'N/A'), stock, info, price, real_g, 0, wacc, roic, ranges, avg_pe, cur_pe, cur_ev, intrinsic, upside, eps, 22.0, is_fin)
+                    data = compile_stock_data(sym, info.get('industry', 'N/A'), stock, info, price, real_g, 0, wacc, roic, pe_rng, pb_rng, ps_rng, ev_rng, avg_pe, cur_pe, cur_ev, intrinsic, upside, eps, 22.0, is_fin)
                     st.metric("現價", f"{price} TWD")
                     st.metric("合理價", f"{intrinsic:.1f} TWD", f"{upside:.1%} 潛在空間")
                     st.progress(data['Total_Score']/100, text=f"模型評分: {int(data['Total_Score'])}")
@@ -395,9 +390,9 @@ with tab2:
                     with col_info: st.dataframe(pd.DataFrame([data]).drop(columns=['Total_Score', '產業別']).T, use_container_width=True)
                 except Exception as e: st.error("查無資料或發生錯誤")
 
-# --- Tab 3: 真·時光機回測 (V6.0 PIT 引擎) ---
+# --- Tab 3: 真·時光機回測 ---
 with tab3:
-    st.markdown("⚠️ **V6.0 真·時點回測**：系統將自動過濾進場日之後的「未來財報」，模擬當時真實的估值與得分。")
+    st.markdown("⚠️ **V6.0 真·時點回測**：過濾進場日之後的「未來財報」，模擬當時真實的估值與得分。")
     c1, c2 = st.columns(2)
     with c1: t_input = st.text_area("測試代碼 (逗號分隔):", "1519.TW, 3017.TW, 2330.TW")
     with c2: s_date = st.date_input("進場日 (時光機日期):", datetime(2023, 11, 27)); run_bt = st.button("執行時點回測", type="primary")
