@@ -10,7 +10,7 @@ import warnings
 # ==========================================
 # 頁面與基本設定
 # ==========================================
-st.set_page_config(page_title="V6.3 Eric Chi估值模型", page_icon="📊", layout="wide")
+st.set_page_config(page_title="V6.4 Eric Chi估值模型", page_icon="📊", layout="wide")
 warnings.simplefilter(action='ignore', category=FutureWarning)
 
 # ==========================================
@@ -41,16 +41,16 @@ def get_growth_data(stock, symbol):
     return stock.info.get('revenueGrowth', 0.0)
 
 # ==========================================
-# 1. 歷史區間計算
+# 1. 歷史區間計算 (V6.4 修復解包錯誤)
 # ==========================================
 def get_historical_metrics(stock, hist_data):
     try:
-        if hist_data.empty: return "-", "-", "-", "-", 0
+        if hist_data.empty: return ["-", "-", "-", "-"], 0
         hist_data.index = hist_data.index.tz_localize(None)
         
         fin = stock.quarterly_financials.T
         bs = stock.quarterly_balance_sheet.T
-        if fin.empty or bs.empty: return "-", "-", "-", "-", 0
+        if fin.empty or bs.empty: return ["-", "-", "-", "-"], 0
         
         fin.index = pd.to_datetime(fin.index).tz_localize(None)
         bs.index = pd.to_datetime(bs.index).tz_localize(None)
@@ -88,8 +88,9 @@ def get_historical_metrics(stock, hist_data):
             clean = [v for v in vals if 0 < v < 150]
             return f"{min(clean):.1f}-{max(clean):.1f}" if clean else "-"
             
-        return fmt_rng(pe_vals), fmt_rng(pb_vals), fmt_rng(ps_vals), fmt_rng(evebitda_vals), (np.mean(pe_vals) if pe_vals else 0)
-    except: return "-", "-", "-", "-", 0
+        # 修正點：將 4 個區間包成一個 list 回傳，確保外部只解包出 2 個變數
+        return [fmt_rng(pe_vals), fmt_rng(pb_vals), fmt_rng(ps_vals), fmt_rng(evebitda_vals)], (np.mean(pe_vals) if pe_vals else 0)
+    except: return ["-", "-", "-", "-"], 0
 
 # ==========================================
 # 2. 估值核心
@@ -272,7 +273,7 @@ def run_pit_backtest(sym, stock, target_date, is_finance):
 # ==========================================
 # UI 介面
 # ==========================================
-st.title("V6.3 Eric Chi估值模型")
+st.title("V6.4 Eric Chi估值模型")
 tab1, tab2, tab3 = st.tabs(["全產業掃描", "單股查詢", "真·時光機回測"])
 
 # --- Tab 1: 全產業掃描 ---
@@ -294,16 +295,14 @@ with tab1:
                 status_text.text(f"進度: {idx+1}/{total_inds} | 正在精算 [{ind}]...")
                 tickers = df_all[df_all["Industry"] == ind]["Ticker"].tolist()
                 
-                # 🛡️ 加入安全過濾器：過濾掉市值為空值的無效股票
                 caps = []
                 for t in tickers:
                     try:
                         mcap = yf.Ticker(t).fast_info.get('market_cap')
-                        if mcap and float(mcap) > 0: # 確保有資料且大於 0
+                        if mcap and float(mcap) > 0: 
                             caps.append((t, float(mcap)))
                     except: pass
                 
-                # 安全排序：只有有效數據才會進到這裡
                 caps.sort(key=lambda x: x[1], reverse=True)
                 targets = [x[0] for x in caps[:max(len(caps)//2, 1)]]
                 
