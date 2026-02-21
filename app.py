@@ -16,51 +16,17 @@ warnings.simplefilter(action='ignore', category=FutureWarning)
 # ==========================================
 # 0. 基礎爬蟲 (函數更名以強制清除舊的錯誤快取)
 # ==========================================
-@st.cache_data(ttl=86400, show_spinner=False)
+# [V6.2 終極解法] 讀取本地 CSV 資料庫，徹底擺脫證交所防火牆
+@st.cache_data(show_spinner=False)
 def fetch_industry_list_v6():
-    """絕對乾淨的資料抓取層，內部絕對不可包含任何 st. 語法"""
-    data = []
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-    
-    # 引擎 1: 證交所 ISIN 網頁爬蟲 (抓取最完整 27 產業)
     try:
-        for mode in [2, 4]:
-            url = f"https://isin.twse.com.tw/isin/C_public.jsp?strMode={mode}"
-            res = requests.get(url, headers=headers, timeout=10)
-            res.encoding = "big5"
-            soup = BeautifulSoup(res.text, "html.parser")
-            rows = soup.find("table", {"class": "h4"}).find_all("tr")[1:]
-            for row in rows:
-                cells = row.find_all("td")
-                if len(cells) != 7: continue
-                raw = cells[0].text.strip()
-                if "　" in raw:
-                    code, name = raw.split("　", 1)
-                    if len(code) == 4:
-                        industry = cells[4].text.strip()
-                        if industry:
-                            ticker = f"{code}.TW" if mode == 2 else f"{code}.TWO"
-                            data.append({"Code": code, "Name": name, "Industry": industry, "Ticker": ticker})
-        if len(data) > 100: return pd.DataFrame(data).drop_duplicates(subset=['Code'])
-    except: pass
-
-    # 引擎 2: OpenAPI 備援
-    try:
-        res_l = requests.get("https://openapi.twse.com.tw/v1/opendata/t187ap03_L", timeout=10)
-        if res_l.status_code == 200:
-            for item in res_l.json():
-                if len(item.get("公司代號", "")) == 4:
-                    data.append({"Code": item["公司代號"], "Name": item["公司名稱"], "Industry": item["產業別"], "Ticker": f"{item['公司代號']}.TW"})
-        res_o = requests.get("https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap03_O", timeout=10)
-        if res_o.status_code == 200:
-            for item in res_o.json():
-                if len(item.get("公司代號", "")) == 4:
-                    data.append({"Code": item["公司代號"], "Name": item["公司名稱"], "Industry": item["產業別"], "Ticker": f"{item['公司代號']}.TWO"})
-        if len(data) > 100: return pd.DataFrame(data).drop_duplicates(subset=['Code'])
-    except: pass
-
-    return pd.DataFrame() 
-
+        # 直接讀取我們上傳到 GitHub 的資料庫
+        df = pd.read_csv('tw_stock_list.csv')
+        return df
+    except Exception as e:
+        st.error("找不到 'tw_stock_list.csv' 檔案。請確認是否已將該檔案上傳至 GitHub。")
+        return pd.DataFrame()
+        
 def get_tw_yahoo_cum_growth(symbol):
     headers = {'User-Agent': 'Mozilla/5.0'}
     try:
@@ -412,4 +378,5 @@ with tab3:
             df_bt = pd.DataFrame(res_bt)
             st.metric("投資組合平均至今報酬率", f"{df_bt['Raw'].mean()*100:.1f}%")
             cols_show = ['代碼', '名稱', '進場日', '進場價', '當時PE', '當時合理價', '當時總分', '當時狀態', '3個月', '6個月', '12個月', '至今報酬']
+
             st.dataframe(df_bt[cols_show], use_container_width=True)
