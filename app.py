@@ -11,7 +11,7 @@ import time
 # ==========================================
 # 頁面與基本設定
 # ==========================================
-st.set_page_config(page_title="V6.13 Eric Chi估值模型", page_icon="📊", layout="wide")
+st.set_page_config(page_title="V6.14 Eric Chi估值模型", page_icon="📊", layout="wide")
 warnings.simplefilter(action='ignore', category=FutureWarning)
 
 if 'scan_results' not in st.session_state:
@@ -87,17 +87,33 @@ def get_historical_metrics(stock, hist_data):
         
         for rpt_date in fin.index:
             try:
-                price = float(hist_data.iloc[hist_data.index.get_indexer([rpt_date], method='nearest')[0]]['Close'])
+                if rpt_date not in hist_data.index:
+                    nearest_idx = hist_data.index.get_indexer([rpt_date], method='nearest')[0]
+                    if nearest_idx == -1: continue
+                    price = float(hist_data.iloc[nearest_idx]['Close'])
+                else:
+                    price = float(hist_data.loc[rpt_date]['Close'])
+                
+                if isinstance(price, pd.Series): price = price.iloc[0]
+                
                 if rpt_date in bs.index:
                     bs_row = bs.loc[rpt_date]
-                    ev = (price * shares) + safe_get(bs_row, 'Total Debt', 0) - safe_get(bs_row, 'Cash And Cash Equivalents', 0)
-                    ebitda = safe_get(fin.loc[rpt_date], 'EBITDA', safe_get(fin.loc[rpt_date], 'EBIT', 0))
-                    if ebitda > 0: evebitda_vals.append(ev / (ebitda * 4))
+                    total_debt = safe_get(bs_row, 'Total Debt', 0)
+                    cash = safe_get(bs_row, 'Cash And Cash Equivalents', 0)
+                    ev = (price * shares) + total_debt - cash
+                    
+                    fin_row = fin.loc[rpt_date]
+                    ebit = safe_get(fin_row, 'EBIT', 0)
+                    ebitda = safe_get(fin_row, 'EBITDA', ebit)
+                    if ebitda > 0:
+                        ratio = ev / (ebitda * 4) 
+                        if 0 < ratio < 100: evebitda_vals.append(ratio)
                 
-                eps = safe_get(fin.loc[rpt_date], 'Basic EPS', 0)
+                fin_row_2 = fin.loc[rpt_date]
+                eps = safe_get(fin_row_2, 'Basic EPS', 0)
                 if eps > 0: pe_vals.append(price / (eps * 4))
                 
-                rev = safe_get(fin.loc[rpt_date], 'Total Revenue', 0)
+                rev = safe_get(fin_row_2, 'Total Revenue', 0)
                 if rev > 0: ps_vals.append(price / ((rev/shares) * 4))
                 
                 if rpt_date in bs.index:
@@ -327,22 +343,22 @@ def run_pit_backtest(sym, stock, target_date, is_finance, med_pe=18.0):
 # ==========================================
 # UI 介面
 # ==========================================
-st.title("V6.13 Eric Chi估值模型")
+st.title("V6.14 Eric Chi估值模型")
 tab1, tab2, tab3 = st.tabs(["產業精準掃描", "單股查詢", "真·時光機回測"])
 
-# --- Tab 1: 產業精準掃描 ---
+# --- Tab 1: 產業精準掃描 (市值前50%回歸版) ---
 with tab1:
     df_all = fetch_industry_list_v6()
     if df_all.empty:
         st.error("❌ 找不到 tw_stock_list.csv")
     else:
         valid_industries = sorted([i for i in df_all['Industry'].unique()])
-        st.info("💡 **防斷線提示**：請利用下方選單，每次挑選 3~5 個產業進行掃描，確保穩定產出。")
+        st.info("💡 **過濾器升級**：已重啟「市值前50%」嚴選機制。為防斷線，建議每次勾選 1~3 個產業。")
         
         selected_inds = st.multiselect(
             "請選擇要掃描的產業：", 
             options=valid_industries, 
-            default=valid_industries[:3]
+            default=valid_industries[:2]
         )
         
         c1, c2 = st.columns([1, 1])
@@ -356,11 +372,30 @@ with tab1:
                     cols_display = ['股票代碼', '名稱', '現價', '營收成長率', '營業利益率', '淨利率', '預估EPS', 'P/E (TTM)', 'P/B (Lag)', 'P/S (Lag)', 'EV/EBITDA', '預估範圍P/E', '預估範圍P/B', '預估範圍P/S', '預估範圍EV/EBITDA', 'DCF合理價', '狀態', 'vs產業PE', '選股邏輯']
                     
                     for idx, ind in enumerate(selected_inds):
-                        status_text.text(f"⏳ 正在精算: [{ind}] ({idx+1}/{total_inds})...")
-                        tickers = df_all[df_all["Industry"] == ind]["Ticker"].tolist()[:12]
+                        status_text.text(f"⏳ [{ind}] ({idx+1}/{total_inds}) 階段一：過濾市值前 50%...")
+                        tickers = df_all[df_all["Industry"] == ind]["Ticker"].tolist()
+                        
+                        caps = []
+                        for t in tickers:
+                            try:
+                                tk = yf.Ticker(t)
+                                mcap = tk.fast_info.get('marketCap') or tk.fast_info.get('market_cap')
+                                if not mcap: mcap = tk.info.get('marketCap', 0)
+                                if mcap and float(mcap) > 0: 
+                                    caps.append((t, float(mcap)))
+                            except: pass
+                        
+                        if caps:
+                            caps.sort(key=lambda x: x[1], reverse=True)
+                            half_len = max(len(caps) // 2, 1)
+                            targets = [x[0] for x in caps[:half_len]]
+                        else:
+                            targets = tickers[:15]
+                            
+                        status_text.text(f"⏳ [{ind}] ({idx+1}/{total_inds}) 階段二：精算 {len(targets)} 檔權值股財報...")
                         
                         ind_pes = []; raw_data = []
-                        for sym in tickers:
+                        for sym in targets:
                             try:
                                 stock = yf.Ticker(sym); info = stock.info
                                 price = info.get('currentPrice') or info.get('previousClose')
@@ -387,7 +422,6 @@ with tab1:
                                 time.sleep(0.3) 
                             except: pass
                         
-                        # V6.11 PE清洗邏輯完美回歸
                         clean_pes = [pe for pe in ind_pes if 5 < pe < 60]
                         pe_med = np.median(clean_pes) if clean_pes else 22.0
                         
@@ -426,7 +460,7 @@ with tab1:
             full_df = pd.concat([x[1] for x in st.session_state.scan_results])
             st.download_button("💾 下載目前累積的所有報告 (CSV)", data=full_df.to_csv(index=False).encode('utf-8-sig'), file_name=f"TW_Stock_Scan_Accumulated_{datetime.now().strftime('%Y%m%d')}.csv", mime="text/csv")
             for ind, df_ind in st.session_state.scan_results:
-                with st.expander(f"🏆 {ind} (Top 6)", expanded=True):
+                with st.expander(f"🏆 {ind} (市值前50% 嚴選 Top 6)", expanded=True):
                     st.dataframe(df_ind.drop(columns=['Total_Score']), use_container_width=True)
 
 # --- Tab 2: 單股查詢 ---
@@ -441,7 +475,6 @@ with tab2:
                 
             with st.spinner("查詢中..."):
                 try:
-                    # V6.11 動態產業 PE 完美回歸
                     df_all = fetch_industry_list_v6()
                     ind = df_all.loc[df_all['Ticker'] == sym, 'Industry'].iloc[0] if (not df_all.empty and sym in df_all['Ticker'].values) else "未知產業"
                     med_pe = DEFAULT_PE_MAP.get(ind, 18.0) 
@@ -452,8 +485,6 @@ with tab2:
                         st.error("❌ 抓不到股價，API 可能暫時超時。")
                     else:
                         real_g = get_growth_data(stock, sym)
-                        
-                        # V6.11 QoQ 動能評估完美回歸
                         q_fin = stock.quarterly_financials
                         if not q_fin.empty and len(q_fin.columns) >= 2:
                             rev_q1 = safe_get(q_fin.iloc[:, 0], 'Total Revenue')
@@ -490,15 +521,12 @@ with tab3:
             try:
                 sym = raw_sym if (raw_sym.endswith('.TW') or raw_sym.endswith('.TWO')) else f"{raw_sym}.TW"
                 stock = yf.Ticker(sym)
-                
-                # V6.11 動態 PE 與防呆完美回歸
                 ind = df_all.loc[df_all['Ticker'] == sym, 'Industry'].iloc[0] if (not df_all.empty and sym in df_all['Ticker'].values) else ""
                 med_pe = DEFAULT_PE_MAP.get(ind, 18.0)
                 is_fin = any(x in ind for x in ["金融", "保險"])
                 
                 pit_data = run_pit_backtest(sym, stock, s_date.strftime('%Y-%m-%d'), is_fin, med_pe)
                 if pit_data: res_bt.append(pit_data)
-                
                 time.sleep(0.3)
             except: pass
             pb.progress((i+1)/len(t_list))
