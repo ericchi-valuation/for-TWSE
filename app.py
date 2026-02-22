@@ -444,3 +444,24 @@ with tab2:
 
 # --- Tab 3: 真·時光機回測 ---
 with tab3:
+    st.markdown("⚠️ **V6.8 真·時點回測**：剝離時區干擾，精準還原當時最新財報與股價狀態。")
+    c1, c2 = st.columns(2)
+    with c1: t_input = st.text_area("代碼:", "1519.TW, 3017.TW, 2330.TW")
+    with c2: s_date = st.date_input("日期:", datetime(2023, 11, 27)); run_bt = st.button("執行", type="primary")
+    if run_bt:
+        res_bt = []; pb = st.progress(0); t_list = [t.strip() for t in t_input.split(',')]
+        for i, sym in enumerate(t_list):
+            try:
+                stock = yf.Ticker(sym)
+                is_fin = "Financial" in stock.info.get('sector', '')
+                pit_data = run_pit_backtest(sym, stock, s_date.strftime('%Y-%m-%d'), is_fin)
+                if pit_data: res_bt.append(pit_data)
+            except: pass
+            pb.progress((i+1)/len(t_list))
+        if res_bt:
+            df_bt = pd.DataFrame(res_bt)
+            st.metric("平均至今報酬", f"{df_bt['Raw'].mean()*100:.1f}%")
+            cols_show = ['代碼', '名稱', '進場日', '進場價', '當時PE', '當時合理價', '當時總分', '當時狀態', '3個月', '6個月', '12個月', '至今報酬']
+            st.dataframe(df_bt[cols_show], use_container_width=True)
+        else:
+            st.warning("⚠️ 查無歷史數據，可能是日期過舊或代碼有誤。")
