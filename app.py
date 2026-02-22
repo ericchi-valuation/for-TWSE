@@ -10,7 +10,7 @@ import warnings
 # ==========================================
 # 頁面與基本設定
 # ==========================================
-st.set_page_config(page_title="V6.7 Eric Chi估值模型", page_icon="📊", layout="wide")
+st.set_page_config(page_title="V6.8 Eric Chi估值模型", page_icon="📊", layout="wide")
 warnings.simplefilter(action='ignore', category=FutureWarning)
 
 # ==========================================
@@ -145,11 +145,11 @@ def get_3_stage_valuation(stock, is_finance, real_growth):
     except: return 0, 0, 0.1, 0
 
 # ==========================================
-# 3. 評分邏輯 (IB 與 Quant 嚴格審核機制)
+# 3. 評分邏輯 (IB 與 Quant 嚴謹版)
 # ==========================================
 def calculate_raw_scores(info, financials, growth_rate, qoq_growth, valuation_upside, cur_pe, cur_ev_ebitda, hist_avg_pe, industry_pe_median, wacc, roic):
     scores = {'Q': 0, 'V': 0, 'G': 0, 'Msg': []}
-    w_q, w_v, w_g = (0.2, 0.3, 0.5) if growth_rate > 0.15 else ((0.5, 0.4, 0.1) if growth_rate < 0.05 else (0.3, 0.4, 0.3))
+    w_q, w_v, w_g = (0.3, 0.4, 0.3) if growth_rate < 0.15 else (0.2, 0.3, 0.5)
     scores['Lifecycle'] = "Growth" if growth_rate > 0.15 else ("Mature" if growth_rate < 0.05 else "Stable")
 
     # Quality Check
@@ -161,7 +161,7 @@ def calculate_raw_scores(info, financials, growth_rate, qoq_growth, valuation_up
     elif icr < 1.5: scores['Q'] -= 5; scores['Msg'].append("高財務風險")
     else: scores['Q'] += 1
     
-    if roic > wacc + 0.05: scores['Q'] += 5 # IB: 需超越 WACC 5% 才拿滿分
+    if roic > wacc + 0.05: scores['Q'] += 5 
     elif roic > wacc: scores['Q'] += 1
     else: scores['Msg'].append("ROIC<WACC")
 
@@ -172,16 +172,17 @@ def calculate_raw_scores(info, financials, growth_rate, qoq_growth, valuation_up
         
     if hist_avg_pe > 0 and 0 < cur_pe < (hist_avg_pe * 1.1): scores['V'] += 3
     if industry_pe_median > 0 and 0 < cur_pe < industry_pe_median: scores['V'] += 3
-    if 0 < cur_ev_ebitda < 18: scores['V'] += 3
+    # V6.8 更嚴格的 EV/EBITDA 標準 (從18降至15)
+    if 0 < cur_ev_ebitda < 15: scores['V'] += 3
 
-    # Growth Check (IB 成長門檻與利潤率雙重檢查)
+    # Growth Check
     if growth_rate > 0.10 and roic < wacc: 
         scores['G'] -= 5; scores['Msg'].append("無效成長")
     else:
-        if growth_rate > 0.25: scores['G'] += 5 # IB: 門檻提升至 25%
+        if growth_rate > 0.25: scores['G'] += 5
         elif growth_rate > 0.15: scores['G'] += 3
         
-    try: # IB: 賠錢賺吆喝檢查
+    try: 
         op_now = financials.loc['Operating Income'].iloc[0] / financials.loc['Total Revenue'].iloc[0]
         op_prev = financials.loc['Operating Income'].iloc[1] / financials.loc['Total Revenue'].iloc[1]
         if op_now < op_prev * 0.95 and growth_rate > 0.1:
@@ -195,7 +196,7 @@ def calculate_raw_scores(info, financials, growth_rate, qoq_growth, valuation_up
 
     raw_total = (scores['Q'] * w_q * 10) + (scores['V'] * w_v * 10) + (scores['G'] * w_g * 10)
     
-    # Quant: ROIC < WACC 總分打 7 折一票否決
+    # 絕對制裁：若摧毀價值，原始分數強制打 7 折
     if roic < wacc: raw_total *= 0.7 
         
     scores['Raw_Total'] = raw_total
@@ -206,7 +207,7 @@ def compile_stock_data(symbol, ind, stock, info, price, real_g, qoq_g, wacc, roi
     final_score = override_score if override_score is not None else min(scores['Raw_Total'], 100)
     
     status = f"{scores['Lifecycle']} | Q:{scores['Q']} V:{scores['V']} G:{scores['G']}" + (f" | ⚠️{' '.join(scores['Msg'])}" if scores['Msg'] else "")
-    logic = f"Score: {int(final_score)}" + (" (首選)" if final_score >= 85 else "")
+    logic = f"Score: {int(final_score)}" + (" (首選)" if final_score >= 80 else "")
     
     return {
         '產業別': ind, '股票代碼': symbol, '名稱': info.get('shortName', symbol), '現價': price,
@@ -220,15 +221,24 @@ def compile_stock_data(symbol, ind, stock, info, price, real_g, qoq_g, wacc, roi
     }
 
 # ==========================================
-# 4. 時點回測引擎 (Point-in-Time Engine)
+# 4. 時點回測引擎 (V6.8 修復時區衝突版)
 # ==========================================
 def run_pit_backtest(sym, stock, target_date, is_finance):
     try:
+        # 建立無時區目標日
         target_dt = pd.to_datetime(target_date).tz_localize(None)
+        
+        # 取得歷史資料
         hist = stock.history(start=target_dt - pd.Timedelta(days=3650), end=datetime.today())
-        if hist.empty or hist[hist.index >= target_dt].empty: return None
-
-        entry_price = hist[hist.index >= target_dt]['Close'].iloc[0]
+        if hist.empty: return None
+        
+        # 關鍵修復：強制剝離 yfinance 回傳的時區，確保比較時不會報錯
+        hist.index = hist.index.tz_localize(None)
+        
+        future_prices = hist[hist.index >= target_dt]
+        if future_prices.empty: return None
+        
+        entry_price = future_prices['Close'].iloc[0]
         current_price = hist['Close'].iloc[-1]
 
         q_fin = stock.quarterly_financials.T
@@ -238,6 +248,7 @@ def run_pit_backtest(sym, stock, target_date, is_finance):
         q_fin.index = pd.to_datetime(q_fin.index).tz_localize(None)
         q_bs.index = pd.to_datetime(q_bs.index).tz_localize(None)
         
+        # 過濾未來財報
         valid_dates = q_fin.index[q_fin.index + pd.Timedelta(days=45) <= target_dt]
         if len(valid_dates) < 4: return None
 
@@ -290,11 +301,10 @@ def run_pit_backtest(sym, stock, target_date, is_finance):
         mock_fin = pd.DataFrame({'EBIT': [ebit], 'Interest Expense': [abs(q_fin.loc[latest_date].get('Interest Expense', ebit*0.1))]})
         scores = calculate_raw_scores(stock.info, mock_fin, real_growth, qoq_growth, upside, cur_pe, cur_ev_ebitda, avg_pe, 22.0, wacc, roic)
 
-        dates = hist[hist.index >= target_dt].index
         def get_ret(days):
-            td = dates[0] + pd.Timedelta(days=days)
-            idx = dates.searchsorted(td)
-            if idx < len(dates): return (hist['Close'].iloc[idx] - entry_price) / entry_price
+            td = future_prices.index[0] + pd.Timedelta(days=days)
+            idx = future_prices.index.searchsorted(td)
+            if idx < len(future_prices): return (future_prices['Close'].iloc[idx] - entry_price) / entry_price
             return None
 
         return {
@@ -312,7 +322,7 @@ def run_pit_backtest(sym, stock, target_date, is_finance):
 # ==========================================
 # UI 介面
 # ==========================================
-st.title("V6.7 Eric Chi估值模型")
+st.title("V6.8 Eric Chi估值模型")
 tab1, tab2, tab3 = st.tabs(["全產業掃描", "單股查詢", "真·時光機回測"])
 
 # --- Tab 1: 全產業掃描 ---
@@ -324,12 +334,10 @@ with tab1:
         st.error("❌ 找不到 tw_stock_list.csv，請確認已上傳。")
     else:
         valid_industries = sorted([i for i in df_all['Industry'].unique()])
-        st.info(f"偵測到 {len(valid_industries)} 個產業。系統已啟動 Quant 相對排序與 IB 嚴篩機制。")
+        st.info(f"偵測到 {len(valid_industries)} 個產業。已啟動「絕對-相對雙軌制」鑑別度優化引擎。")
         if st.button("執行全產業掃描", type="primary"):
             pb = st.progress(0); status_text = st.empty(); results_container = st.container()
             total_inds = len(valid_industries)
-            
-            # 完整 19 欄位全數歸隊
             cols_display = ['股票代碼', '名稱', '現價', '營收成長率', '營業利益率', '淨利率', '預估EPS', 'P/E (TTM)', 'P/B (Lag)', 'P/S (Lag)', 'EV/EBITDA', '預估範圍P/E', '預估範圍P/B', '預估範圍P/S', '預估範圍EV/EBITDA', 'DCF/DDM合理價', '狀態', 'vs產業PE', '選股邏輯']
             
             for idx, ind in enumerate(valid_industries):
@@ -377,7 +385,7 @@ with tab1:
                 
                 pe_med = np.median(ind_pes) if ind_pes else 22.0
                 
-                # Quant: 產業內強制百分位數排名 (Percentile Ranking)
+                # V6.8 鑑別度系統: 絕對基底 (80%) + 相對排名 (加減20%)
                 raw_scores = []
                 for d in raw_data:
                     s = calculate_raw_scores(d['info'], d['stock'].financials.fillna(0), d['real_g'], d['qoq_g'], d['upside'], d['cur_pe'], d['cur_ev'], d['avg_pe'], pe_med, d['wacc'], d['roic'])
@@ -385,7 +393,10 @@ with tab1:
                 
                 if len(raw_scores) > 1:
                     ranks = pd.Series(raw_scores).rank(pct=True)
-                    adjusted_scores = 40 + (ranks * 60) # 強制分配在 40~100 確保鑑別度
+                    # 第一名拿到 1.2 倍加成，最後一名變成 0.8 倍衰減
+                    multiplier = 0.8 + (ranks * 0.4) 
+                    adjusted_scores = pd.Series(raw_scores) * multiplier
+                    adjusted_scores = adjusted_scores.clip(upper=100) # 最高分不超過100
                 else:
                     adjusted_scores = pd.Series(raw_scores)
 
@@ -398,7 +409,7 @@ with tab1:
                 if ind_results:
                     df_ind = pd.DataFrame(ind_results).sort_values(by='Total_Score', ascending=False).head(6)
                     with results_container:
-                        st.markdown(f"### 🏆 {ind} (強勢排名 Top 6)")
+                        st.markdown(f"### 🏆 {ind} (鑑別度排名 Top 6)")
                         st.dataframe(df_ind[cols_display], use_container_width=True)
                 pb.progress((idx + 1) / total_inds)
             status_text.text("✅ 全市場產業掃描完成！")
@@ -433,17 +444,3 @@ with tab2:
 
 # --- Tab 3: 真·時光機回測 ---
 with tab3:
-    c1, c2 = st.columns(2)
-    with c1: t_input = st.text_area("代碼:", "1519.TW, 3017.TW, 2330.TW")
-    with c2: s_date = st.date_input("日期:", datetime(2023, 11, 27)); run_bt = st.button("執行", type="primary")
-    if run_bt:
-        res_bt = []; pb = st.progress(0); t_list = [t.strip() for t in t_input.split(',')]
-        for i, sym in enumerate(t_list):
-            stock = yf.Ticker(sym)
-            pit_data = run_pit_backtest(sym, stock, s_date.strftime('%Y-%m-%d'), "Financial" in stock.info.get('sector', ''))
-            if pit_data: res_bt.append(pit_data)
-            pb.progress((i+1)/len(t_list))
-        if res_bt:
-            df_bt = pd.DataFrame(res_bt)
-            st.metric("平均報酬", f"{df_bt['Raw'].mean()*100:.1f}%")
-            st.dataframe(df_bt.drop(columns=['Raw']), use_container_width=True)
