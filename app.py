@@ -10,8 +10,15 @@ import warnings
 # ==========================================
 # 頁面與基本設定
 # ==========================================
-st.set_page_config(page_title="V6.8 Eric Chi估值模型", page_icon="📊", layout="wide")
+st.set_page_config(page_title="V6.9 Eric Chi估值模型", page_icon="📊", layout="wide")
 warnings.simplefilter(action='ignore', category=FutureWarning)
+
+def strip_tz(dt_index):
+    """安全剝離時區的終極防護盾"""
+    try:
+        return pd.to_datetime(dt_index).tz_localize(None)
+    except TypeError:
+        return pd.to_datetime(dt_index) # 若本來就沒時區則直接回傳
 
 # ==========================================
 # 0. 基礎資料庫 (讀取上傳的 CSV)
@@ -46,7 +53,7 @@ def get_growth_data(stock, symbol):
 def get_historical_metrics(stock, hist_data):
     try:
         if hist_data.empty: return ["-", "-", "-", "-"], 0
-        hist_data.index = pd.to_datetime(hist_data.index).tz_localize(None)
+        hist_data.index = strip_tz(hist_data.index)
         hist_data = hist_data.sort_index()
         
         fin = stock.quarterly_financials.T
@@ -58,8 +65,8 @@ def get_historical_metrics(stock, hist_data):
             if fin.empty or bs.empty:
                 return ["-", "-", "-", "-"], 0
                 
-        fin.index = pd.to_datetime(fin.index).tz_localize(None)
-        bs.index = pd.to_datetime(bs.index).tz_localize(None)
+        fin.index = strip_tz(fin.index)
+        bs.index = strip_tz(bs.index)
         
         pe_vals, pb_vals, ps_vals, evebitda_vals = [], [], [], []
         shares = stock.info.get('sharesOutstanding', 1)
@@ -152,7 +159,6 @@ def calculate_raw_scores(info, financials, growth_rate, qoq_growth, valuation_up
     w_q, w_v, w_g = (0.3, 0.4, 0.3) if growth_rate < 0.15 else (0.2, 0.3, 0.5)
     scores['Lifecycle'] = "Growth" if growth_rate > 0.15 else ("Mature" if growth_rate < 0.05 else "Stable")
 
-    # Quality Check
     try: 
         ebit = financials.loc['EBIT'].iloc[0] if 'EBIT' in financials.index else financials.loc['Operating Income'].iloc[0]
         icr = ebit / abs(financials.loc['Interest Expense'].iloc[0])
@@ -165,17 +171,14 @@ def calculate_raw_scores(info, financials, growth_rate, qoq_growth, valuation_up
     elif roic > wacc: scores['Q'] += 1
     else: scores['Msg'].append("ROIC<WACC")
 
-    # Value Check
     if valuation_upside > 0.15: scores['V'] += 4
     elif valuation_upside > 0.0: scores['V'] += 2
     elif valuation_upside < -0.20: scores['V'] -= 4; scores['Msg'].append("估值過熱")
         
     if hist_avg_pe > 0 and 0 < cur_pe < (hist_avg_pe * 1.1): scores['V'] += 3
     if industry_pe_median > 0 and 0 < cur_pe < industry_pe_median: scores['V'] += 3
-    # V6.8 更嚴格的 EV/EBITDA 標準 (從18降至15)
     if 0 < cur_ev_ebitda < 15: scores['V'] += 3
 
-    # Growth Check
     if growth_rate > 0.10 and roic < wacc: 
         scores['G'] -= 5; scores['Msg'].append("無效成長")
     else:
@@ -196,7 +199,6 @@ def calculate_raw_scores(info, financials, growth_rate, qoq_growth, valuation_up
 
     raw_total = (scores['Q'] * w_q * 10) + (scores['V'] * w_v * 10) + (scores['G'] * w_g * 10)
     
-    # 絕對制裁：若摧毀價值，原始分數強制打 7 折
     if roic < wacc: raw_total *= 0.7 
         
     scores['Raw_Total'] = raw_total
@@ -221,20 +223,15 @@ def compile_stock_data(symbol, ind, stock, info, price, real_g, qoq_g, wacc, roi
     }
 
 # ==========================================
-# 4. 時點回測引擎 (V6.8 修復時區衝突版)
+# 4. 時點回測引擎 (V6.9 防呆與時區強化版)
 # ==========================================
 def run_pit_backtest(sym, stock, target_date, is_finance):
     try:
-        # 建立無時區目標日
         target_dt = pd.to_datetime(target_date).tz_localize(None)
-        
-        # 取得歷史資料
         hist = stock.history(start=target_dt - pd.Timedelta(days=3650), end=datetime.today())
         if hist.empty: return None
         
-        # 關鍵修復：強制剝離 yfinance 回傳的時區，確保比較時不會報錯
-        hist.index = hist.index.tz_localize(None)
-        
+        hist.index = strip_tz(hist.index)
         future_prices = hist[hist.index >= target_dt]
         if future_prices.empty: return None
         
@@ -245,10 +242,9 @@ def run_pit_backtest(sym, stock, target_date, is_finance):
         q_bs = stock.quarterly_balance_sheet.T
         if q_fin.empty or q_bs.empty: return None
         
-        q_fin.index = pd.to_datetime(q_fin.index).tz_localize(None)
-        q_bs.index = pd.to_datetime(q_bs.index).tz_localize(None)
+        q_fin.index = strip_tz(q_fin.index)
+        q_bs.index = strip_tz(q_bs.index)
         
-        # 過濾未來財報
         valid_dates = q_fin.index[q_fin.index + pd.Timedelta(days=45) <= target_dt]
         if len(valid_dates) < 4: return None
 
@@ -322,7 +318,7 @@ def run_pit_backtest(sym, stock, target_date, is_finance):
 # ==========================================
 # UI 介面
 # ==========================================
-st.title("V6.8 Eric Chi估值模型")
+st.title("V6.9 Eric Chi估值模型")
 tab1, tab2, tab3 = st.tabs(["全產業掃描", "單股查詢", "真·時光機回測"])
 
 # --- Tab 1: 全產業掃描 ---
@@ -385,7 +381,6 @@ with tab1:
                 
                 pe_med = np.median(ind_pes) if ind_pes else 22.0
                 
-                # V6.8 鑑別度系統: 絕對基底 (80%) + 相對排名 (加減20%)
                 raw_scores = []
                 for d in raw_data:
                     s = calculate_raw_scores(d['info'], d['stock'].financials.fillna(0), d['real_g'], d['qoq_g'], d['upside'], d['cur_pe'], d['cur_ev'], d['avg_pe'], pe_med, d['wacc'], d['roic'])
@@ -393,10 +388,9 @@ with tab1:
                 
                 if len(raw_scores) > 1:
                     ranks = pd.Series(raw_scores).rank(pct=True)
-                    # 第一名拿到 1.2 倍加成，最後一名變成 0.8 倍衰減
                     multiplier = 0.8 + (ranks * 0.4) 
                     adjusted_scores = pd.Series(raw_scores) * multiplier
-                    adjusted_scores = adjusted_scores.clip(upper=100) # 最高分不超過100
+                    adjusted_scores = adjusted_scores.clip(upper=100) 
                 else:
                     adjusted_scores = pd.Series(raw_scores)
 
@@ -420,7 +414,11 @@ with tab2:
     with col_input:
         stock_code = st.text_input("輸入代碼 (例如: 2330):", value="2330")
         if st.button("查詢", type="primary"):
-            sym = f"{stock_code}.TW"
+            # 單股查詢的防呆自動補齊
+            sym = stock_code.strip().upper()
+            if not sym.endswith('.TW') and not sym.endswith('.TWO'):
+                sym = f"{sym}.TW"
+                
             with st.spinner("查詢中..."):
                 try:
                     stock = yf.Ticker(sym); info = stock.info
@@ -444,20 +442,26 @@ with tab2:
 
 # --- Tab 3: 真·時光機回測 ---
 with tab3:
-    st.markdown("⚠️ **V6.8 真·時點回測**：剝離時區干擾，精準還原當時最新財報與股價狀態。")
+    st.markdown("⚠️ **V6.9 真·時點回測**：支援自動防呆補齊 .TW，精準還原當時最新財報與股價狀態。")
     c1, c2 = st.columns(2)
-    with c1: t_input = st.text_area("代碼:", "1519.TW, 3017.TW, 2330.TW")
+    with c1: t_input = st.text_area("代碼:", "1519, 3017, 2330")
     with c2: s_date = st.date_input("日期:", datetime(2023, 11, 27)); run_bt = st.button("執行", type="primary")
     if run_bt:
-        res_bt = []; pb = st.progress(0); t_list = [t.strip() for t in t_input.split(',')]
-        for i, sym in enumerate(t_list):
+        res_bt = []; pb = st.progress(0); 
+        # V6.9 防呆機制：處理輸入，自動加上 .TW
+        t_list = [t.strip().upper() for t in t_input.split(',')]
+        
+        for i, raw_sym in enumerate(t_list):
             try:
+                sym = raw_sym if (raw_sym.endswith('.TW') or raw_sym.endswith('.TWO')) else f"{raw_sym}.TW"
+                
                 stock = yf.Ticker(sym)
                 is_fin = "Financial" in stock.info.get('sector', '')
                 pit_data = run_pit_backtest(sym, stock, s_date.strftime('%Y-%m-%d'), is_fin)
                 if pit_data: res_bt.append(pit_data)
             except: pass
             pb.progress((i+1)/len(t_list))
+            
         if res_bt:
             df_bt = pd.DataFrame(res_bt)
             st.metric("平均至今報酬", f"{df_bt['Raw'].mean()*100:.1f}%")
