@@ -10,7 +10,7 @@ import warnings
 # ==========================================
 # 頁面與基本設定
 # ==========================================
-st.set_page_config(page_title="V6.5 Eric Chi估值模型", page_icon="📈", layout="wide")
+st.set_page_config(page_title="V6.6 Eric Chi估值模型", page_icon="📈", layout="wide")
 warnings.simplefilter(action='ignore', category=FutureWarning)
 
 # ==========================================
@@ -37,13 +37,11 @@ def get_growth_data(stock, symbol):
     return stock.info.get('revenueGrowth', 0.0)
 
 # ==========================================
-# 1. 歷史區間計算 (V6.5 強化容錯機制)
+# 1. 歷史區間計算
 # ==========================================
 def get_historical_metrics(stock, hist_data):
     try:
         if hist_data.empty: return ["-", "-", "-", "-"], 0, 0
-        
-        # 安全移除時區
         if hist_data.index.tz is not None:
             hist_data.index = hist_data.index.tz_localize(None)
             
@@ -51,15 +49,8 @@ def get_historical_metrics(stock, hist_data):
         bs = stock.quarterly_balance_sheet.T
         if fin.empty or bs.empty: return ["-", "-", "-", "-"], 0, 0
         
-        if pd.to_datetime(fin.index).tz is not None:
-            fin.index = pd.to_datetime(fin.index).tz_localize(None)
-        else:
-            fin.index = pd.to_datetime(fin.index)
-            
-        if pd.to_datetime(bs.index).tz is not None:
-            bs.index = pd.to_datetime(bs.index).tz_localize(None)
-        else:
-            bs.index = pd.to_datetime(bs.index)
+        fin.index = pd.to_datetime(fin.index).tz_localize(None) if fin.index.tz is not None else pd.to_datetime(fin.index)
+        bs.index = pd.to_datetime(bs.index).tz_localize(None) if bs.index.tz is not None else pd.to_datetime(bs.index)
             
         pe_vals, pb_vals, ps_vals, evebitda_vals = [], [], [], []
         shares = stock.info.get('sharesOutstanding', 1)
@@ -74,7 +65,6 @@ def get_historical_metrics(stock, hist_data):
                 else:
                     price = hist_data.loc[rpt_date]['Close']
                 
-                # EV/EBITDA 計算 (多重欄位備援)
                 if rpt_date in bs.index:
                     total_debt = bs.loc[rpt_date].get('Total Debt', 0)
                     cash = bs.loc[rpt_date].get('Cash And Cash Equivalents', bs.loc[rpt_date].get('Cash', 0))
@@ -84,7 +74,6 @@ def get_historical_metrics(stock, hist_data):
                         ratio = ev / (ebitda * 4) 
                         if 0 < ratio < 100: evebitda_vals.append(ratio)
                 
-                # PE, PS, PB 計算 (多重欄位備援)
                 eps = fin.loc[rpt_date].get('Basic EPS', fin.loc[rpt_date].get('Diluted EPS', 0))
                 if pd.notna(eps) and eps > 0: pe_vals.append(price / (eps * 4))
                 
@@ -143,7 +132,7 @@ def get_3_stage_valuation(stock, is_finance, real_growth):
     except: return 0, 0, 0.1, 0
 
 # ==========================================
-# 3. 評分與資料整合 (嚴格對齊 V6.5 規範)
+# 3. 評分與資料整合 
 # ==========================================
 def calculate_scores(info, real_growth, qoq_growth, upside, cur_pe, cur_ev_ebitda, hist_avg_pe, industry_pe_median, cur_pb, min_pb, wacc, roic, debt_to_ebitda, op_margins):
     scores = {'Q': 0, 'V': 0, 'G': 0, 'Total': 0, 'Msg': []}
@@ -208,13 +197,16 @@ def compile_stock_data(symbol, ind, stock, info, price, real_g, qoq_g, wacc, roi
     
     cur_pb = info.get('priceToBook', 0) or 0
     if pd.isna(cur_pb): cur_pb = 0
+    
+    cur_ps = info.get('priceToSalesTrailing12Months', 0) or 0
+    if pd.isna(cur_ps): cur_ps = 0
 
     scores = calculate_scores(info, real_g, qoq_g, upside, cur_pe, cur_ev, avg_pe, med_pe, cur_pb, min_pb, wacc, roic, debt_to_ebitda, op_margins)
     
     status = f"{scores['Lifecycle']} | Q:{scores['Q']} V:{scores['V']} G:{scores['G']}" + (f" | ⚠️{' '.join(scores['Msg'])}" if scores['Msg'] else "")
     logic = f"Score: {int(scores['Total'])}" + (" (首選)" if scores['Total'] >= 70 else "")
     
-    # 嚴格遵守要求的 17 個欄位順序與格式
+    # [嚴格遵守要求的 17 個欄位順序與格式]
     return {
         '股票代碼': symbol,
         '名稱': info.get('shortName', symbol),
@@ -225,6 +217,7 @@ def compile_stock_data(symbol, ind, stock, info, price, real_g, qoq_g, wacc, roi
         '淨利率': f"{info.get('profitMargins', 0)*100:.1f}%",
         'P/E (TTM)': round(cur_pe, 1) if cur_pe else "-", 
         'P/B (Lag)': round(cur_pb, 2),
+        'P/S (Lag)': round(cur_ps, 2),
         'EV/EBITDA': f"{cur_ev:.1f}" if cur_ev > 0 else "-",
         '預估範圍P/E': ranges[0], 
         '預估範圍P/B': ranges[1], 
@@ -239,13 +232,19 @@ def compile_stock_data(symbol, ind, stock, info, price, real_g, qoq_g, wacc, roi
     }
 
 # ==========================================
-# 4. 時點回測引擎 (維持 V6.4)
+# 4. 時光機回測引擎 (修復時區衝突報錯)
 # ==========================================
 def run_pit_backtest(sym, stock, target_date, is_finance):
     try:
         target_dt = pd.to_datetime(target_date).tz_localize(None)
         hist = stock.history(start=target_dt - pd.Timedelta(days=3650), end=datetime.today())
-        if hist.empty or hist[hist.index >= target_dt].empty: return None
+        if hist.empty: return None
+
+        # 核心修復：強制剝除 yfinance 回傳的時區，避免與 target_dt 比較時崩潰
+        if hist.index.tz is not None:
+            hist.index = hist.index.tz_localize(None)
+
+        if hist[hist.index >= target_dt].empty: return None
 
         entry_price = hist[hist.index >= target_dt]['Close'].iloc[0]
         current_price = hist['Close'].iloc[-1]
@@ -346,13 +345,13 @@ def run_pit_backtest(sym, stock, target_date, is_finance):
 # ==========================================
 # UI 介面
 # ==========================================
-st.title("V6.5 Eric Chi估值模型")
+st.title("V6.6 Eric Chi估值模型")
 tab1, tab2, tab3 = st.tabs(["全產業掃描", "單股查詢", "真·時光機回測"])
 
-# 表格顯示順序 (嚴格對齊要求)
+# 表格顯示順序 (嚴格對齊 17 個指定欄位)
 cols_display = [
     '股票代碼', '名稱', '現價', '營收成長率', '預估EPS', 
-    '營業利益率', '淨利率', 'P/E (TTM)', 'P/B (Lag)', 'EV/EBITDA', 
+    '營業利益率', '淨利率', 'P/E (TTM)', 'P/B (Lag)', 'P/S (Lag)', 'EV/EBITDA', 
     '預估範圍P/E', '預估範圍P/B', '預估範圍P/S', '預估範圍EV/EBITDA', 
     'DCF/DDM合理價', '狀態', 'vs產業PE', '選股邏輯'
 ]
@@ -366,8 +365,6 @@ with tab1:
         st.error("❌ 找不到 tw_stock_list.csv，請確認已上傳。")
     else:
         valid_industries = sorted([i for i in df_all['Industry'].unique()])
-        
-        # 下拉式選單
         selected_inds = st.multiselect("選擇掃描產業 (可多選):", valid_industries, default=["半導體業", "電腦及週邊設備業"])
         
         if st.button("執行產業掃描", type="primary") and selected_inds:
@@ -430,12 +427,11 @@ with tab1:
             
             if all_scanned_data:
                 df_all_res = pd.DataFrame(all_scanned_data).sort_values(by='Total_Score', ascending=False)
-                # 確保下載的 CSV 也按照嚴格的欄位順序
                 csv = df_all_res[cols_display].to_csv(index=False).encode('utf-8-sig')
                 st.download_button(
                     label="📥 下載完整掃描名單 (CSV)",
                     data=csv,
-                    file_name=f"V6.5_Scanned_Results_{datetime.now().strftime('%Y%m%d')}.csv",
+                    file_name=f"V6.6_Scanned_Results_{datetime.now().strftime('%Y%m%d')}.csv",
                     mime="text/csv"
                 )
 
@@ -471,7 +467,6 @@ with tab2:
                         st.success(data['狀態'])
                         
                         with col_info:
-                            # 移除不需要顯示的後台運算欄位，並將剩下的依照指定的嚴格欄位順序呈現
                             data_show = {k: data[k] for k in cols_display if k in data}
                             df_show = pd.DataFrame([data_show]).T
                             df_show.columns = ['財務數值']
