@@ -7,7 +7,7 @@ from bs4 import BeautifulSoup
 from datetime import datetime, timedelta
 import warnings
 
-st.set_page_config(page_title="V6.8 Eric Chi估值模型", page_icon="📈", layout="wide")
+st.set_page_config(page_title="V6.9 Eric Chi估值模型", page_icon="📈", layout="wide")
 warnings.simplefilter(action='ignore', category=FutureWarning)
 
 # ==========================================
@@ -28,17 +28,21 @@ def get_growth_data(stock, symbol):
             if lbl and '累計營收年增率' in lbl.text:
                 return float(row.select('div > span')[-1].text.replace('%', '').replace(',', '')) / 100.0
     except: pass
-    return stock.info.get('revenueGrowth', 0.0)
+    rev_g = stock.info.get('revenueGrowth', 0.0)
+    return float(rev_g) if rev_g is not None else 0.0
 
 def safe_get(df, idx, keys, default=0):
-    """無敵資料萃取器：自動找尋同義欄位，杜絕 KeyError 崩潰"""
+    """無敵資料萃取器：自動找尋同義欄位，並處理重複日期造成的 Series 錯誤"""
     if idx not in df.index: return default
     for k in keys:
-        if k in df.columns and pd.notna(df.loc[idx, k]): return df.loc[idx, k]
+        if k in df.columns:
+            val = df.loc[idx, k]
+            if isinstance(val, pd.Series): val = val.iloc[0] # 解決 yfinance 日期重複的 Bug
+            if pd.notna(val): return float(val)
     return default
 
 # ==========================================
-# 1. 歷史區間計算 (V6.8 新增 avg_pb 計算)
+# 1. 歷史區間計算
 # ==========================================
 def get_historical_metrics(stock, hist_data):
     try:
@@ -53,15 +57,16 @@ def get_historical_metrics(stock, hist_data):
         bs.index = pd.to_datetime(bs.index).tz_localize(None) if bs.index.tz else pd.to_datetime(bs.index)
             
         pe_vals, pb_vals, ps_vals, evebitda_vals = [], [], [], []
-        shares = stock.info.get('sharesOutstanding', 1) or 1
+        sh = stock.info.get('sharesOutstanding', 1)
+        shares = float(sh) if sh is not None and sh > 0 else 1.0
         
         for r_date in fin.index:
             try:
                 if r_date not in hist_data.index:
                     nearest = hist_data.index.get_indexer([r_date], method='nearest')[0]
                     if nearest == -1: continue
-                    p = hist_data.iloc[nearest]['Close']
-                else: p = hist_data.loc[r_date]['Close']
+                    p = float(hist_data.iloc[nearest]['Close'])
+                else: p = float(hist_data.loc[r_date]['Close'])
                 
                 if r_date in bs.index:
                     debt = safe_get(bs, r_date, ['Total Debt'])
@@ -102,7 +107,10 @@ def get_3_stage_valuation(stock, is_fin, real_g):
         debt = bs.loc['Total Debt'].iloc[0] if 'Total Debt' in bs.index else 0
         cash = bs.loc['Cash And Cash Equivalents'].iloc[0] if 'Cash And Cash Equivalents' in bs.index else 0
         ebit = fin.loc['EBIT'].iloc[0] if 'EBIT' in fin.index else 0
-        wacc = max((eq/(eq+debt))*max(0.035+(stock.info.get('beta',1.0)*0.06),0.07) + (debt/(eq+debt))*0.025, 0.08 if is_fin else 0.0)
+        
+        b = stock.info.get('beta', 1.0)
+        beta = float(b) if b is not None else 1.0
+        wacc = max((eq/(eq+debt))*max(0.035+(beta*0.06),0.07) + (debt/(eq+debt))*0.025, 0.08 if is_fin else 0.0)
         roic = (ebit * 0.8 / (eq + debt - cash)) if (eq + debt - cash) > 0 else 0.05
         
         g1, g_term = min(max(real_g * 0.8, 0.02), 0.25), 0.025
@@ -111,19 +119,21 @@ def get_3_stage_valuation(stock, is_fin, real_g):
             
         dcf = sum([base_cf*((1+g1)**i)/((1+wacc)**i) for i in range(1,4)]) + sum([(base_cf*((1+g1)**3))*((1+(g1+g_term)/2)**(i-3))/((1+wacc)**i) for i in range(4,6)])
         dcf += ((base_cf*((1+g1)**3)*((1+(g1+g_term)/2)**2))*(1+g_term)/(wacc-g_term)) / ((1+wacc)**5)
-        return max((dcf - (debt if not is_fin else 0) + (cash if not is_fin else 0)) / (stock.info.get('sharesOutstanding',1) or 1), 0), g1, wacc, roic
+        
+        sh = stock.info.get('sharesOutstanding', 1)
+        shares = float(sh) if sh is not None and sh > 0 else 1.0
+        return max((dcf - (debt if not is_fin else 0) + (cash if not is_fin else 0)) / shares, 0), g1, wacc, roic
     except: return 0, 0, 0.1, 0
 
 # ==========================================
-# 3. 評分整合 (V6.8 雙軌制估值引擎)
+# 3. 評分整合
 # ==========================================
 def calculate_scores(info, real_g, qoq_g, upside, cur_pe, cur_ev, avg_pe, med_pe, cur_pb, min_pb, avg_pb, wacc, roic, debt_ebitda, op_m, ind):
     s = {'Q': 0, 'V': 0, 'G': 0, 'Total': 0, 'Msg': []}
     wq, wv, wg = (0.2, 0.3, 0.5) if real_g > 0.15 else ((0.5, 0.4, 0.1) if real_g < 0.05 else (0.3, 0.4, 0.3))
     s['Lifecycle'] = "Growth" if real_g > 0.15 else ("Mature" if real_g < 0.05 else "Stable")
 
-    # 辨識是否為景氣循環股
-    cyclical_industries = ["航運業", "鋼鐵工業", "塑膠工業", "玻璃陶瓷", "造紙工業", "橡膠工業", "水泥工業", "建材營造", "光電業"]
+    cyclical_industries = ["航運業", "鋼鐵工業", "塑膠工業", "玻璃陶瓷", "造紙工業", "橡膠工業", "水泥工業", "建材營造", "光電業", "油電燃氣業"]
     is_cyclical = ind in cyclical_industries
 
     # --- Quality ---
@@ -136,14 +146,12 @@ def calculate_scores(info, real_g, qoq_g, upside, cur_pe, cur_ev, avg_pe, med_pe
     elif len(op_m) >= 2 and op_m[0] > op_m[1]: s['Q'] += 2
     elif len(op_m) >= 2 and op_m[0] < op_m[1]: s['Q'] -= 1; s['Msg'].append("營益率下滑")
 
-    # --- Value (雙軌制) ---
+    # --- Value ---
     if is_cyclical:
-        # 標籤 B：景氣循環型 (看淨值與極端倍數)
         if min_pb > 0 and 0 < cur_pb < (min_pb * 1.1): s['V'] += 4
         if avg_pb > 0 and 0 < cur_pb < (avg_pb * 0.8): s['V'] += 3
-        if 0 < cur_ev < 7: s['V'] += 3  # V6.8: EV/EBITDA 嚴格縮小至 7 倍
+        if 0 < cur_ev < 7: s['V'] += 3
     else:
-        # 標籤 A：穩健成長型 (看現金流與盈餘)
         if upside > 0.30: s['V'] += 4
         elif upside > 0.0: s['V'] += 2
         if avg_pe > 0 and 0 < cur_pe < (avg_pe * 1.1): s['V'] += 2
@@ -158,13 +166,12 @@ def calculate_scores(info, real_g, qoq_g, upside, cur_pe, cur_ev, avg_pe, med_pe
         elif real_g > 0.10: s['G'] += 3
     if qoq_g > 0.05: s['G'] += 3
     elif qoq_g < -0.05: s['G'] -= 3; s['Msg'].append("動能轉弱")
-    if 0 < info.get('pegRatio', 0) < 1.5: s['G'] += 2
+    
+    peg = info.get('pegRatio')
+    if peg is not None and 0 < float(peg) < 1.5: s['G'] += 2
 
     s['Total'] = (s['Q']*wq*10) + (s['V']*wv*10) + (s['G']*wg*10)
-    
-    if is_cyclical:
-        s['Msg'].append(f"🔄循環股估值")
-        
+    if is_cyclical: s['Msg'].append(f"🔄循環股估值")
     return s
 
 def compile_stock_data(symbol, ind, stock, info, price, real_g, qoq_g, wacc, roic, ranges, avg_pe, min_pb, avg_pb, cur_pe, cur_ev, intrinsic, upside, eps, is_fin, med_pe):
@@ -181,13 +188,16 @@ def compile_stock_data(symbol, ind, stock, info, price, real_g, qoq_g, wacc, roi
     debt = safe_get(q_bs, q_bs.index[0] if not q_bs.empty else None, ['Total Debt'])
     ttm_ebitda = sum([safe_get(q_fin, d, ['EBITDA', 'EBIT']) for d in q_fin.index[:4]]) if not q_fin.empty else 0
     
-    cur_pb = info.get('priceToBook', 0) or 0
-    cur_ps = info.get('priceToSalesTrailing12Months', 0) or 0
+    cur_pb = float(info.get('priceToBook', 0) or 0)
+    cur_ps = float(info.get('priceToSalesTrailing12Months', 0) or 0)
     
     scores = calculate_scores(info, real_g, qoq_g, upside, cur_pe, cur_ev, avg_pe, med_pe, cur_pb, min_pb, avg_pb, wacc, roic, debt/ttm_ebitda if ttm_ebitda > 0 else 0, op_margins, ind)
     
     status = f"{scores['Lifecycle']} | Q:{scores['Q']} V:{scores['V']} G:{scores['G']}" + (f" | {' '.join(scores['Msg'])}" if scores['Msg'] else "")
     logic = f"Score: {int(scores['Total'])}" + (" (首選)" if scores['Total'] >= 70 else "")
+    
+    op_m_val = float(info.get('operatingMargins', 0) or 0)
+    pm_val = float(info.get('profitMargins', 0) or 0)
     
     return {
         '股票代碼': symbol, 
@@ -195,8 +205,8 @@ def compile_stock_data(symbol, ind, stock, info, price, real_g, qoq_g, wacc, roi
         '現價': price,
         '營收成長率': f"{real_g*100:.1f}%", 
         '預估EPS': round(eps * (1 + min(real_g, 0.1)), 2),
-        '營業利益率': f"{info.get('operatingMargins', 0)*100:.1f}%", 
-        '淨利率': f"{info.get('profitMargins', 0)*100:.1f}%",
+        '營業利益率': f"{op_m_val*100:.1f}%", 
+        '淨利率': f"{pm_val*100:.1f}%",
         'P/E (TTM)': round(cur_pe, 1) if cur_pe else "-", 
         'P/B (Lag)': round(cur_pb, 2),
         'P/S (Lag)': round(cur_ps, 2),
@@ -224,7 +234,8 @@ def run_pit_backtest(sym, stock, target_date, is_finance, industry_name):
         if hist.index.tz: hist.index = hist.index.tz_localize(None)
         if hist[hist.index >= target_dt].empty: raise ValueError("無目標日後股價")
 
-        ep, cp = hist[hist.index >= target_dt]['Close'].iloc[0], hist['Close'].iloc[-1]
+        ep = float(hist[hist.index >= target_dt]['Close'].iloc[0])
+        cp = float(hist['Close'].iloc[-1])
         
         q_fin, q_bs = stock.quarterly_financials.T, stock.quarterly_balance_sheet.T
         if q_fin.empty or q_bs.empty: raise ValueError("YF未提供歷史季報")
@@ -256,7 +267,9 @@ def run_pit_backtest(sym, stock, target_date, is_finance, industry_name):
         equity = safe_get(q_bs, ld, ['Stockholders Equity', 'Total Equity Gross Minority Interest'], default=1)
         debt = safe_get(q_bs, ld, ['Total Debt'])
         cash = safe_get(q_bs, ld, ['Cash And Cash Equivalents', 'Cash'])
-        shares = stock.info.get('sharesOutstanding', 1) or 1
+        
+        sh = stock.info.get('sharesOutstanding', 1)
+        shares = float(sh) if sh is not None and sh > 0 else 1.0
 
         ttm_ebitda = sum([safe_get(q_fin, d, ['EBITDA', 'EBIT']) for d in valid_dates[:4]])
         debt_to_ebitda = debt / ttm_ebitda if ttm_ebitda > 0 else 0
@@ -264,7 +277,9 @@ def run_pit_backtest(sym, stock, target_date, is_finance, industry_name):
         cur_pe = ep / eps_ttm if eps_ttm > 0 else 0
         cur_ev = ((ep * shares) + debt - cash) / (ebitda * 4) if ebitda > 0 else 0
 
-        ke = max(0.035 + stock.info.get('beta', 1.0)*0.06, 0.07)
+        b = stock.info.get('beta', 1.0)
+        beta = float(b) if b is not None else 1.0
+        ke = max(0.035 + beta*0.06, 0.07)
         ic = equity + debt - cash
         roic = (ebit * 0.8 * 4 / ic) if ic > 0 else 0.05
         wacc = max((equity/(equity+debt))*ke + (debt/(equity+debt))*0.025, 0.08 if is_finance else 0.025)
@@ -289,7 +304,9 @@ def run_pit_backtest(sym, stock, target_date, is_finance, industry_name):
         scores = calculate_scores(stock.info, real_growth, qoq_growth, upside, cur_pe, cur_ev, avg_pe, 22.0, cur_pb, min_pb, avg_pb, wacc, roic, debt_to_ebitda, op_margins, industry_name)
 
         dts = hist[hist.index >= target_dt].index
-        def ret(days): return (hist['Close'].iloc[dts.searchsorted(dts[0]+pd.Timedelta(days=days))] - ep)/ep if dts.searchsorted(dts[0]+pd.Timedelta(days=days)) < len(dts) else None
+        def ret(days): 
+            idx = dts.searchsorted(dts[0]+pd.Timedelta(days=days))
+            return (hist['Close'].iloc[idx] - ep)/ep if idx < len(dts) else None
 
         return {
             '代碼': sym, '名稱': stock.info.get('shortName', sym), '進場日': target_dt.strftime('%Y-%m-%d'),
@@ -300,17 +317,16 @@ def run_pit_backtest(sym, stock, target_date, is_finance, industry_name):
             '12個月': f"{ret(365)*100:.1f}%" if ret(365) else "-", '至今報酬': f"{(cp - ep)/ep*100:.1f}%", 'Raw': (cp - ep)/ep
         }
     except Exception as e:
-        return {'代碼': sym, '名稱': '-', '進場日': target_date, '進場價': 0, '現價': 0, '當時總分': 0, '當時狀態': f"⚠️ 無法計算", '當時合理價': 0, '當時PE': 0, '3個月': "-", '6個月': "-", '12個月': "-", '至今報酬': "-", 'Raw': 0}
+        return {'代碼': sym, '名稱': '-', '進場日': target_date, '進場價': 0, '現價': 0, '當時總分': 0, '當時狀態': f"⚠️ 無法計算 ({str(e)[:10]})", '當時合理價': 0, '當時PE': 0, '3個月': "-", '6個月': "-", '12個月': "-", '至今報酬': "-", 'Raw': 0}
 
 # ==========================================
 # UI 介面
 # ==========================================
-st.title("V6.8 Eric Chi估值模型")
+st.title("V6.9 Eric Chi估值模型")
 tab1, tab2, tab3 = st.tabs(["全產業掃描", "單股查詢", "真·時光機回測"])
 
 cols_display = ['股票代碼', '名稱', '現價', '營收成長率', '預估EPS', '營業利益率', '淨利率', 'P/E (TTM)', 'P/B (Lag)', 'P/S (Lag)', 'EV/EBITDA', '預估範圍P/E', '預估範圍P/B', '預估範圍P/S', '預估範圍EV/EBITDA', 'DCF/DDM合理價', '狀態', 'vs產業PE', '選股邏輯']
 
-# --- 讀取共用資料庫 ---
 df_all = fetch_industry_list_v6()
 
 with tab1:
@@ -322,9 +338,14 @@ with tab1:
             for idx, ind in enumerate(selected_inds):
                 status_text.text(f"精算 [{ind}]...")
                 caps = []
+                # V6.9: 安全處理市值為 None 的狀況
                 for t in df_all[df_all["Industry"] == ind]["Ticker"].tolist():
-                    try: caps.append((t, yf.Ticker(t).fast_info['market_cap']))
-                    except: pass
+                    try:
+                        mc = yf.Ticker(t).fast_info.get('market_cap', 0)
+                        caps.append((t, float(mc) if mc is not None else 0.0))
+                    except:
+                        caps.append((t, 0.0))
+                # 市值排序後，只取前 50% 進行運算以節省時間
                 targets = [x[0] for x in sorted(caps, key=lambda x: x[1], reverse=True)[:max(len(caps)//2, 1)]]
                 
                 raw_data, ind_pes = [], []
@@ -337,12 +358,27 @@ with tab1:
                         q_fin = stock.quarterly_financials
                         qoq_g = (q_fin.iloc[0,0]-q_fin.iloc[0,1])/q_fin.iloc[0,1] if not q_fin.empty and len(q_fin.columns)>1 else 0
                         rng, avg_pe, min_pb, avg_pb = get_historical_metrics(stock, stock.history(period="10y"))
-                        eps = info.get('trailingEps', 0); c_pe = p/eps if eps>0 else 0
+                        
+                        eps = info.get('trailingEps')
+                        eps = float(eps) if eps is not None else 0
+                        c_pe = p/eps if eps>0 else 0
                         if 0<c_pe<120: ind_pes.append(c_pe)
-                        c_ev = info.get('enterpriseToEbitda', 0) or ((p*(info.get('sharesOutstanding',1) or 1))+info.get('totalDebt',0)-info.get('totalCash',0))/(info.get('ebitda',1) or 1)
+                        
+                        c_ev = info.get('enterpriseToEbitda')
+                        if c_ev is None:
+                            sh = info.get('sharesOutstanding', 1)
+                            shares = float(sh) if sh is not None else 1.0
+                            debt = float(info.get('totalDebt') or 0)
+                            cash = float(info.get('totalCash') or 0)
+                            ebitda = float(info.get('ebitda') or 1)
+                            if ebitda == 0: ebitda = 1
+                            c_ev = ((p * shares) + debt - cash) / ebitda
+                        else:
+                            c_ev = float(c_ev)
+                            
                         is_fin = any(x in ind for x in ["金融", "保險"])
                         intrin, g, wacc, roic = get_3_stage_valuation(stock, is_fin, real_g)
-                        raw_data.append((sym, ind, stock, info, p, real_g, qoq_g, wacc, roic, rng, avg_pe, min_pb, avg_pb, c_pe, c_ev, intrin, (intrin-p)/p if intrin>0 else -1, eps, is_fin))
+                        raw_data.append((sym, ind, stock, info, float(p), real_g, qoq_g, wacc, roic, rng, avg_pe, min_pb, avg_pb, c_pe, c_ev, intrin, (intrin-p)/p if intrin>0 else -1, eps, is_fin))
                     except: pass
                 
                 med_pe = np.median(ind_pes) if ind_pes else 22.0
@@ -354,17 +390,24 @@ with tab1:
                         st.dataframe(pd.DataFrame(res).sort_values('Total_Score', ascending=False).head(6)[cols_display], use_container_width=True)
                 pb.progress((idx + 1) / len(selected_inds))
             status_text.text("✅ 完成！")
-            if all_data: st.download_button("📥 下載完整名單", pd.DataFrame(all_data).sort_values('Total_Score', ascending=False)[cols_display].to_csv(index=False).encode('utf-8-sig'), f"V6.8_Scan.csv", "text/csv")
+            if all_data: st.download_button("📥 下載完整名單", pd.DataFrame(all_data).sort_values('Total_Score', ascending=False)[cols_display].to_csv(index=False).encode('utf-8-sig'), f"V6.9_Scan.csv", "text/csv")
 
 with tab2:
     c_in, c_out = st.columns([1, 2])
     with c_in:
         sym_input = st.text_input("輸入代碼:", value="2330")
         if st.button("查詢", type="primary"):
-            sym = f"{sym_input}.TW"
-            with st.spinner("查詢中..."):
+            # V6.9: 自動補全 .TW 邏輯
+            sym = sym_input.strip().upper()
+            if not sym.endswith('.TW') and not sym.endswith('.TWO'):
+                if not df_all.empty:
+                    match = df_all[df_all['Code'].astype(str) == str(sym)]
+                    sym = match.iloc[0]['Ticker'] if not match.empty else f"{sym}.TW"
+                else:
+                    sym = f"{sym}.TW"
+
+            with st.spinner(f"查詢中 ({sym})..."):
                 try:
-                    # 嘗試從本地清單尋找真實產業名稱，供動態估值判斷
                     ind_lookup = df_all[df_all['Ticker'] == sym]['Industry'] if not df_all.empty else pd.Series()
                     real_industry = ind_lookup.iloc[0] if not ind_lookup.empty else "未知"
 
@@ -374,8 +417,14 @@ with tab2:
                     q_fin = stock.quarterly_financials
                     qoq_g = (q_fin.iloc[0,0]-q_fin.iloc[0,1])/q_fin.iloc[0,1] if not q_fin.empty and len(q_fin.columns)>1 else 0
                     rng, avg_pe, min_pb, avg_pb = get_historical_metrics(stock, stock.history(period="10y"))
-                    eps = info.get('trailingEps', 0); c_pe = p/eps if eps>0 else 0
-                    c_ev = info.get('enterpriseToEbitda', 0)
+                    
+                    eps = info.get('trailingEps')
+                    eps = float(eps) if eps is not None else 0
+                    c_pe = p/eps if eps>0 else 0
+                    
+                    c_ev = info.get('enterpriseToEbitda')
+                    c_ev = float(c_ev) if c_ev is not None else 0
+                    
                     is_fin = any(x in real_industry for x in ["金融", "保險"])
                     intrin, g, wacc, roic = get_3_stage_valuation(stock, is_fin, real_g)
                     
@@ -383,16 +432,26 @@ with tab2:
                     st.metric("合理價", f"{intrin:.1f}", f"{(intrin-p)/p if intrin>0 else -1:.1%} 空間")
                     st.success(data['狀態'])
                     with c_out: st.dataframe(pd.DataFrame([{k: data[k] for k in cols_display if k in data}]).T, use_container_width=True)
-                except Exception as e: st.error("查無資料")
+                except Exception as e: st.error("查無資料，請確認代碼是否正確。")
 
 with tab3:
     c1, c2 = st.columns(2)
-    with c1: t_input = st.text_area("代碼:", "2603.TW, 2002.TW, 2330.TW") # 加入航運與鋼鐵測試循環股邏輯
+    with c1: t_input = st.text_area("代碼:", "2603, 2002, 2330") 
     with c2: s_date = st.date_input("日期:", datetime(2023, 11, 27)); run_bt = st.button("執行", type="primary")
     if run_bt:
-        res_bt, pb, t_list = [], st.progress(0), [t.strip() for t in t_input.split(',')]
+        # V6.9: 智慧處理輸入的代碼
+        t_list_raw = [t.strip().upper() for t in t_input.split(',')]
+        t_list = []
+        for sym in t_list_raw:
+            if not sym.endswith('.TW') and not sym.endswith('.TWO'):
+                if not df_all.empty:
+                    match = df_all[df_all['Code'].astype(str) == str(sym)]
+                    t_list.append(match.iloc[0]['Ticker'] if not match.empty else f"{sym}.TW")
+                else: t_list.append(f"{sym}.TW")
+            else: t_list.append(sym)
+
+        res_bt, pb = [], st.progress(0)
         for i, sym in enumerate(t_list):
-            # 從本地清單取得真實產業名稱
             ind_lookup = df_all[df_all['Ticker'] == sym]['Industry'] if not df_all.empty else pd.Series()
             real_industry = ind_lookup.iloc[0] if not ind_lookup.empty else "未知"
             is_fin = any(x in real_industry for x in ["金融", "保險"])
