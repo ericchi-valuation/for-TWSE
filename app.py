@@ -4,31 +4,15 @@ import pandas as pd
 import numpy as np
 import os
 import io
-import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
+
 from datetime import datetime, timedelta
 import warnings
 
 st.set_page_config(page_title="V7.4 Eric Chi 估值模型 (真實市值極速版)", page_icon="🏦", layout="wide")
 warnings.simplefilter(action='ignore', category=FutureWarning)
 
-# ==========================================
-# 0. 建立「反封鎖」連線 Session
-# ==========================================
-@st.cache_resource(show_spinner=False)
-def get_yf_session():
-    session = requests.Session()
-    retry = Retry(connect=3, backoff_factor=0.5, status_forcelist=[429, 500, 502, 503, 504])
-    adapter = HTTPAdapter(max_retries=retry)
-    session.mount('http://', adapter)
-    session.mount('https://', adapter)
-    session.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-    })
-    return session
-
-yf_session = get_yf_session()
+# ✅ V7.5: 新版 yfinance (>=0.2.38) 已內建 curl_cffi 防封鎖
+# 不再接受 requests.Session，由 yfinance 自動管理連線
 
 # ==========================================
 # 1. 讀取本地三大金庫 (Parquet 極速版)
@@ -274,7 +258,7 @@ def run_pit_backtest_local(sym, target_date, is_finance, industry_name):
         if target_dt.tzinfo is not None:
             target_dt = target_dt.tz_localize(None)
 
-        stock = yf.Ticker(sym, session=yf_session)
+        stock = yf.Ticker(sym)
         # ✅ FIX C: end 使用 datetime.today() 確保 tz-naive
         hist = stock.history(
             start=(target_dt - pd.Timedelta(days=3650)).strftime('%Y-%m-%d'),
@@ -390,7 +374,7 @@ with tab1:
                 
                 # ✅ FIX A: 使用相容新舊版的安全解析器取得批量收盤價
                 try:
-                    bulk_data = yf.download(tickers_list, period="5d", progress=False, session=yf_session)
+                    bulk_data = yf.download(tickers_list, period="5d", progress=False)
                     latest_prices = parse_bulk_close(bulk_data, tickers_list)
                 except Exception as e:
                     st.warning(f"批量下載 [{ind}] 失敗：{e}")
@@ -416,7 +400,7 @@ with tab1:
                 status_text.text(f"精算 [{ind}] 估值模型...")
                 for sym in targets:
                     try:
-                        stock = yf.Ticker(sym, session=yf_session)
+                        stock = yf.Ticker(sym)
                         p = float(latest_prices.get(sym, 0) or 0)
                         if pd.isna(p) or p == 0:
                             continue
@@ -545,7 +529,7 @@ with tab2:
                     real_industry = ind_lookup.iloc[0] if not ind_lookup.empty else "未知"
                     is_fin = any(x in real_industry for x in ["金融", "保險"])
 
-                    stock = yf.Ticker(sym, session=yf_session)
+                    stock = yf.Ticker(sym)
 
                     # ✅ FIX B: 使用安全的多重回退方式取得股價
                     p = get_current_price(stock)
@@ -639,7 +623,7 @@ with tab3:
     with c1:
         t_input = st.text_area("代碼 (逗號分隔):", "2603, 2002, 2330")
     with c2:
-        s_date = st.date_input("回溯進場日:", datetime(2023, 11, 27))
+        s_date = st.date_input("回溯進場日:", datetime(2022, 10, 25))
         run_bt = st.button("執行", type="primary")
     
     if run_bt:
