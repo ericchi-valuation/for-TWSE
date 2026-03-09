@@ -415,7 +415,8 @@ with tab1:
                             continue
                         ld = p_is.index[0]
                         
-                        eps = safe_val(p_is, ld, ['EPS']) * 4
+                        # ✅ TTM EPS: 近四季加總
+                        eps = sum(safe_val(p_is, d, ['EPS']) for d in p_is.index[:4])
                         # ✅ TTM YoY: 近四季累積營收 vs 去年同期四季累積
                         rev_ttm  = sum(safe_val(p_is, d, ['Revenue']) for d in p_is.index[:4])
                         rev_prev = sum(safe_val(p_is, d, ['Revenue']) for d in p_is.index[4:8]) if len(p_is) >= 8 else 0
@@ -549,7 +550,8 @@ with tab2:
                         st.error("❌ 本地資料庫中找不到這檔股票的財報！")
                     else:
                         ld = p_is.index[0]
-                        eps = safe_val(p_is, ld, ['EPS']) * 4
+                        # ✅ TTM EPS: 近四季加總
+                        eps = sum(safe_val(p_is, d, ['EPS']) for d in p_is.index[:4])
                         # ✅ TTM YoY: 近四季累積營收 vs 去年同期四季累積
                         rev_ttm  = sum(safe_val(p_is, d, ['Revenue']) for d in p_is.index[:4])
                         rev_prev = sum(safe_val(p_is, d, ['Revenue']) for d in p_is.index[4:8]) if len(p_is) >= 8 else 0
