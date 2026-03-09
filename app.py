@@ -460,6 +460,9 @@ with tab1:
                         )
                         
                         op_rev = safe_val(p_is, ld, ['Revenue'])
+                        # ✅ 淨利率：用 EPS_TTM × 股數 / Revenue_TTM 反推（NetIncome資料較舊）
+                        _ni_ttm = eps * shares
+                        _rev_ttm = rev_ttm if rev_ttm > 0 else (op_rev * 4)
                         raw_data.append({
                             '股票代碼': sym,
                             '名稱': info.get('shortName', sym),
@@ -467,7 +470,7 @@ with tab1:
                             '營收成長率': f"{real_g*100:.1f}%",
                             '預估EPS': round(eps * (1 + min(real_g, 0.1)), 2),
                             '營業利益率': f"{(safe_val(p_is, ld, ['OperatingIncome'])/op_rev)*100:.1f}%" if op_rev > 0 else "-",
-                            '淨利率': f"{(sum(safe_val(p_is, d, ['NetIncome']) for d in p_is.index[:4]) / sum(safe_val(p_is, d, ['Revenue']) for d in p_is.index[:4]) * 100):.1f}%" if sum(safe_val(p_is, d, ['Revenue']) for d in p_is.index[:4]) > 0 else "-",
+                            '淨利率': f"{(_ni_ttm / _rev_ttm * 100):.1f}%" if _rev_ttm > 0 else "-",
                             'P/E (TTM)': round(c_pe, 1) if c_pe else "-",
                             'P/B (Lag)': round(c_pb, 2),
                             'P/S (Lag)': round(p / (op_rev * 4 / shares), 2) if op_rev > 0 else "-",
@@ -595,12 +598,15 @@ with tab2:
                         )
 
                         op_rev = safe_val(p_is, ld, ['Revenue'])
+                        # ✅ 淨利率：用 EPS_TTM × 股數 / Revenue_TTM 反推（NetIncome資料較舊）
+                        _ni_ttm = eps * shares
+                        _rev_ttm = rev_ttm if rev_ttm > 0 else (op_rev * 4)
                         data = {
                             '股票代碼': sym, '名稱': info.get('shortName', sym), '現價': float(p),
                             '營收成長率': f"{real_g*100:.1f}%",
                             '預估EPS': round(eps * (1 + min(real_g, 0.1)), 2),
                             '營業利益率': f"{(safe_val(p_is, ld, ['OperatingIncome'])/op_rev)*100:.1f}%" if op_rev > 0 else "-",
-                            '淨利率': f"{(sum(safe_val(p_is, d, ['NetIncome']) for d in p_is.index[:4]) / sum(safe_val(p_is, d, ['Revenue']) for d in p_is.index[:4]) * 100):.1f}%" if sum(safe_val(p_is, d, ['Revenue']) for d in p_is.index[:4]) > 0 else "-",
+                            '淨利率': f"{(_ni_ttm / _rev_ttm * 100):.1f}%" if _rev_ttm > 0 else "-",
                             'P/E (TTM)': round(c_pe, 1) if c_pe else "-",
                             'P/B (Lag)': round(c_pb, 2),
                             'P/S (Lag)': round(p / (op_rev * 4 / shares), 2) if op_rev > 0 else "-",
