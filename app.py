@@ -416,11 +416,13 @@ with tab1:
                         ld = p_is.index[0]
                         
                         eps = safe_val(p_is, ld, ['EPS']) * 4
+                        # ✅ TTM YoY: 近四季累積營收 vs 去年同期四季累積
+                        rev_ttm  = sum(safe_val(p_is, d, ['Revenue']) for d in p_is.index[:4])
+                        rev_prev = sum(safe_val(p_is, d, ['Revenue']) for d in p_is.index[4:8]) if len(p_is) >= 8 else 0
+                        real_g = (rev_ttm - rev_prev) / rev_prev if rev_prev > 0 else 0
+                        # QoQ 動能: 最新單季 vs 去年同季
                         r_now = safe_val(p_is, p_is.index[0], ['Revenue'])
-                        r_prev = safe_val(p_is, p_is.index[4], ['Revenue']) if len(p_is) >= 5 else 0
-                        r_prev_qoq = safe_val(p_is, p_is.index[1], ['Revenue']) if len(p_is) > 1 else 0
-                        
-                        real_g = (r_now - r_prev) / r_prev if r_prev > 0 else 0
+                        r_prev_qoq = safe_val(p_is, p_is.index[4], ['Revenue']) if len(p_is) >= 5 else 0
                         qoq_g = (r_now - r_prev_qoq) / r_prev_qoq if r_prev_qoq > 0 else 0
                         
                         shares = float(info.get('sharesOutstanding', 1) or 1)
@@ -548,11 +550,13 @@ with tab2:
                     else:
                         ld = p_is.index[0]
                         eps = safe_val(p_is, ld, ['EPS']) * 4
+                        # ✅ TTM YoY: 近四季累積營收 vs 去年同期四季累積
+                        rev_ttm  = sum(safe_val(p_is, d, ['Revenue']) for d in p_is.index[:4])
+                        rev_prev = sum(safe_val(p_is, d, ['Revenue']) for d in p_is.index[4:8]) if len(p_is) >= 8 else 0
+                        real_g = (rev_ttm - rev_prev) / rev_prev if rev_prev > 0 else 0
+                        # QoQ 動能: 最新單季 vs 去年同季
                         r_now = safe_val(p_is, p_is.index[0], ['Revenue'])
-                        r_prev = safe_val(p_is, p_is.index[4], ['Revenue']) if len(p_is) >= 5 else 0
-                        r_prev_qoq = safe_val(p_is, p_is.index[1], ['Revenue']) if len(p_is) > 1 else 0
-                        
-                        real_g = (r_now - r_prev) / r_prev if r_prev > 0 else 0
+                        r_prev_qoq = safe_val(p_is, p_is.index[4], ['Revenue']) if len(p_is) >= 5 else 0
                         qoq_g = (r_now - r_prev_qoq) / r_prev_qoq if r_prev_qoq > 0 else 0
                         
                         shares = float(info.get('sharesOutstanding', 1) or 1)
