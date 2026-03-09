@@ -168,40 +168,83 @@ def get_historical_metrics_local(p_is, p_bs, p_cf, hist_price, current_shares):
         return [fmt_rng(c_pe), fmt_rng(c_pb), fmt_rng([v for v in ps_vals if 0<v<150]), fmt_rng(evebitda_vals)], np.mean(c_pe) if c_pe else 0, min(c_pb) if c_pb else 0, np.mean(c_pb) if c_pb else 0
     except: return ["-"]*4, 0, 0, 0
 
-def get_3_stage_valuation_local(p_is, p_bs, p_cf, shares, is_fin, real_g, beta):
+def get_3_stage_valuation_local(p_is, p_bs, p_cf, shares, is_fin, real_g, beta, div_per_share=0):
     try:
         if p_is.empty: return (0, 0, 0), 0, 0.1, 0
         ld = p_is.index[0]
-        
+
         eq = safe_val(p_bs, ld, ['EquityAttributableToOwnersOfParent', 'TotalEquity'], 1)
         debt = safe_val(p_bs, ld, ['CurrentLiabilities']) + safe_val(p_bs, ld, ['NoncurrentLiabilities'])
         cash = safe_val(p_bs, ld, ['CashAndCashEquivalents'])
         op_inc = safe_val(p_is, ld, ['OperatingIncome'])
-        
-        op_cf = safe_val(p_cf, ld, ['CashFlowsFromOperatingActivities', 'NetCashInflowFromOperatingActivities'])
-        inv_cf = safe_val(p_cf, ld, ['CashProvidedByInvestingActivities'])
-        fcf = op_cf + inv_cf if (op_cf + inv_cf) > 0 else op_inc * 0.7 
-        
-        int_exp = abs(safe_val(p_cf, ld, ['InterestExpense', 'PayTheInterest']) or safe_val(p_is, ld, ['TotalNonoperatingIncomeAndExpense']))
-        kd = int_exp / debt if debt > 0 else 0.025
-        kd = max(min(kd, 0.12), 0.015) 
         ke = max(0.035 + (beta * 0.06), 0.07)
-        wacc = max((eq/(eq+debt))*ke + (debt/(eq+debt))*kd*(1-0.20), 0.08 if is_fin else 0.04)
-        
+        g_term = 0.025
+
         ic = eq + debt - cash
         roic = (op_inc * 0.8 / ic) if ic > 0 else 0.05
-        
-        g1_base, g_term = min(max(real_g * 0.8, 0.02), 0.25), 0.025
-        base_cf = safe_val(p_is, ld, ['NetIncome']) if is_fin else fcf
+
+        # ==========================================
+        # ✅ 金融保險業：三階段 DDM（股利折現模型）
+        # ==========================================
+        if is_fin:
+            # 取得每股股利：優先用 yfinance 回報的年化股利，其次用 EPS × 標準配息率估算
+            eps_ttm = sum(safe_val(p_is, d, ['EPS']) for d in p_is.index[:4])
+            if div_per_share > 0:
+                d0 = float(div_per_share)
+            elif eps_ttm > 0:
+                d0 = eps_ttm * 0.65  # 金融業平均配息率約 60-70%
+            else:
+                return (0, 0, 0), 0, ke, roic
+
+            g1 = min(max(real_g * 0.8, 0.01), 0.12)  # 金融業成長上限 12%
+
+            def calc_ddm(g, r):
+                if r <= g_term: r = g_term + 0.01
+                d, pv = d0, 0.0
+                # 第一階段：高速成長 3 年
+                for i in range(1, 4):
+                    d *= (1 + g)
+                    pv += d / ((1 + r) ** i)
+                # 第二階段：過渡 2 年
+                g_mid = (g + g_term) / 2
+                for i in range(4, 6):
+                    d *= (1 + g_mid)
+                    pv += d / ((1 + r) ** i)
+                # 終端價值（Gordon Growth）
+                tv = d * (1 + g_term) / (r - g_term) / ((1 + r) ** 5)
+                return max(pv + tv, 0)
+
+            return (
+                calc_ddm(g1, ke),
+                calc_ddm(g1 * 0.5, ke * 1.05),
+                calc_ddm(g1 * 1.2, ke * 0.95)
+            ), g1, ke, roic
+
+        # ==========================================
+        # 非金融業：三階段 DCF
+        # ==========================================
+        op_cf = safe_val(p_cf, ld, ['CashFlowsFromOperatingActivities', 'NetCashInflowFromOperatingActivities'])
+        inv_cf = safe_val(p_cf, ld, ['CashProvidedByInvestingActivities'])
+        fcf = op_cf + inv_cf if (op_cf + inv_cf) > 0 else op_inc * 0.7
+
+        int_exp = abs(safe_val(p_cf, ld, ['InterestExpense', 'PayTheInterest']) or safe_val(p_is, ld, ['TotalNonoperatingIncomeAndExpense']))
+        kd = int_exp / debt if debt > 0 else 0.025
+        kd = max(min(kd, 0.12), 0.015)
+        wacc = max((eq/(eq+debt))*ke + (debt/(eq+debt))*kd*(1-0.20), 0.04)
+
+        g1_base = min(max(real_g * 0.8, 0.02), 0.25)
+        base_cf = fcf
         if base_cf <= 0: return (0, 0, 0), g1_base, wacc, roic
-            
+
         def calc_dcf(g, w):
-            dcf = sum([base_cf*((1+g)**i)/((1+w)**i) for i in range(1,4)]) + sum([(base_cf*((1+g)**3))*((1+(g+g_term)/2)**(i-3))/((1+w)**i) for i in range(4,6)])
+            dcf = sum([base_cf*((1+g)**i)/((1+w)**i) for i in range(1,4)])
+            dcf += sum([(base_cf*((1+g)**3))*((1+(g+g_term)/2)**(i-3))/((1+w)**i) for i in range(4,6)])
             dcf += ((base_cf*((1+g)**3)*((1+(g+g_term)/2)**2))*(1+g_term)/(w-g_term)) / ((1+w)**5)
-            return max((dcf - (debt if not is_fin else 0) + cash) / (shares if shares > 0 else 1), 0)
+            return max((dcf - debt + cash) / (shares if shares > 0 else 1), 0)
 
         return (calc_dcf(g1_base, wacc), calc_dcf(g1_base * 0.5, wacc * 1.1), calc_dcf(g1_base * 1.2, wacc * 0.95)), g1_base, wacc, roic
     except: return (0, 0, 0), 0, 0.1, 0
+
 
 def calculate_scores(info, real_g, qoq_g, upside, cur_pe, cur_ev, avg_pe, med_pe, cur_pb, min_pb, avg_pb, wacc, roic, debt_ebitda, op_m, ind):
     s = {'Q': 0, 'V': 0, 'G': 0, 'Total': 0, 'Msg': []}
@@ -309,7 +352,7 @@ def run_pit_backtest_local(sym, target_date, is_finance, industry_name):
         # 歷史區段的股價（不超過目標日）
         hist_for_metrics = hist[hist.index <= target_dt]
         rng, avg_pe, min_pb, avg_pb = get_historical_metrics_local(p_is, p_bs, p_cf, hist_for_metrics, current_shares)
-        vals, g, wacc, roic = get_3_stage_valuation_local(p_is, p_bs, p_cf, hist_shares, is_finance, real_growth, info.get('beta', 1.0))
+        vals, g, wacc, roic = get_3_stage_valuation_local(p_is, p_bs, p_cf, hist_shares, is_finance, real_growth, info.get('beta', 1.0), float(info.get('dividendRate', 0) or 0))
         base_intrin = vals[0]
 
         upside = (base_intrin - ep) / ep if base_intrin > 0 else -1
@@ -347,7 +390,8 @@ def run_pit_backtest_local(sym, target_date, is_finance, industry_name):
 st.title("V7.4 Eric Chi 估值模型 (真實市值極速版)")
 tab1, tab2, tab3 = st.tabs(["全產業掃描", "單股深度查詢", "真·時光機回測"])
 cols_display = ['股票代碼', '名稱', '現價', '營收成長率', '預估EPS', '營業利益率', '淨利率',
-                'P/E (TTM)', 'P/B (Lag)', 'P/S (Lag)', 'EV/EBITDA', 'DCF合理價區間', '狀態', 'vs產業PE', '選股邏輯']
+                'P/E (TTM)', 'P/B (Lag)', 'P/S (Lag)', 'EV/EBITDA', 'DCF/DDM合理價區間',
+                '預估P/E區間', '預估P/B區間', '預估P/S區間', '狀態', 'vs產業PE', '選股邏輯']
 
 # ==========================================
 # Tab 1. 全產業掃描
@@ -426,25 +470,34 @@ with tab1:
                         r_prev_qoq = safe_val(p_is, p_is.index[4], ['Revenue']) if len(p_is) >= 5 else 0
                         qoq_g = (r_now - r_prev_qoq) / r_prev_qoq if r_prev_qoq > 0 else 0
                         
-                        shares = float(info.get('sharesOutstanding', 1) or 1)
-                        
+                        # ✅ shares: 優先 yfinance，失敗時用本地 BS 資料（避免預設 1 導致 DCF 飆高）
+                        shares = float(info.get('sharesOutstanding', 0) or 0)
+                        if shares <= 0:
+                            shares = get_historical_shares(p_bs, ld, 0)
+                        if shares <= 0:
+                            continue
+
                         # 使用批次抓取的股价做歷史比對（避免逐筆呼叫 history API）
                         hist_10y = stock.history(period="10y")
                         if hist_10y.index.tz:
                             hist_10y.index = hist_10y.index.tz_localize(None)
                         rng, avg_pe, min_pb, avg_pb = get_historical_metrics_local(p_is, p_bs, p_cf, hist_10y, shares)
-                        
+
                         c_pe = p / eps if eps > 0 else 0
                         eq_val = safe_val(p_bs, ld, ['EquityAttributableToOwnersOfParent'])
                         c_pb = p / (eq_val / shares) if eq_val > 0 else 0
-                        
+
                         debt = safe_val(p_bs, ld, ['CurrentLiabilities']) + safe_val(p_bs, ld, ['NoncurrentLiabilities'])
                         cash = safe_val(p_bs, ld, ['CashAndCashEquivalents'])
-                        ebitda = safe_val(p_is, ld, ['OperatingIncome']) + safe_val(p_cf, ld, ['Depreciation'])
-                        c_ev = ((p * shares) + debt - cash) / (ebitda * 4) if ebitda > 0 else 0
+                        # ✅ EV/EBITDA: 用 TTM + abs(Depreciation) 避免負値抗消
+                        ebitda_ttm = sum(
+                            safe_val(p_is, d, ['OperatingIncome']) + abs(safe_val(p_cf, d, ['Depreciation']))
+                            for d in p_is.index[:4]
+                        )
+                        c_ev = ((p * shares) + debt - cash) / ebitda_ttm if ebitda_ttm > 0 else 0
                         
                         is_fin = any(x in ind for x in ["金融", "保險"])
-                        vals, g, wacc, roic = get_3_stage_valuation_local(p_is, p_bs, p_cf, shares, is_fin, real_g, info.get('beta', 1.0))
+                        vals, g, wacc, roic = get_3_stage_valuation_local(p_is, p_bs, p_cf, shares, is_fin, real_g, info.get('beta', 1.0), float(info.get('dividendRate', 0) or 0))
                         
                         upside = (vals[0] - p) / p if vals[0] > 0 else -1
                         op_margins = [
@@ -456,7 +509,7 @@ with tab1:
                         scores = calculate_scores(
                             info, real_g, qoq_g, upside, c_pe, c_ev, avg_pe, med_pe,
                             c_pb, min_pb, avg_pb, wacc, roic,
-                            debt / (ebitda * 4) if ebitda > 0 else 0, op_margins, ind
+                            debt / ebitda_ttm if ebitda_ttm > 0 else 0, op_margins, ind
                         )
                         
                         op_rev = safe_val(p_is, ld, ['Revenue'])
@@ -475,7 +528,10 @@ with tab1:
                             'P/B (Lag)': round(c_pb, 2),
                             'P/S (Lag)': round(p / (op_rev * 4 / shares), 2) if op_rev > 0 else "-",
                             'EV/EBITDA': f"{c_ev:.1f}" if c_ev > 0 else "-",
-                            'DCF合理價區間': f"{vals[0]:.1f} ({vals[1]:.1f}-{vals[2]:.1f})",
+                            '預估P/E區間': f"{vals[1]/eps:.1f}-{vals[2]/eps:.1f}" if eps > 0 and vals[1] > 0 else "-",
+                            '預估P/B區間': f"{vals[1]/(eq_val/shares):.1f}-{vals[2]/(eq_val/shares):.1f}" if eq_val > 0 and vals[1] > 0 else "-",
+                            '預估P/S區間': f"{vals[1]/(rev_ttm/shares):.1f}-{vals[2]/(rev_ttm/shares):.1f}" if rev_ttm > 0 and shares > 0 and vals[1] > 0 else "-",
+                            'DCF/DDM合理價區間': f"{vals[0]:.1f} ({vals[1]:.1f}-{vals[2]:.1f})",
                             '狀態': (
                                 f"{scores['Lifecycle']} | Q:{scores['Q']} V:{scores['V']} G:{scores['G']}"
                                 + (f" | {' '.join(scores['Msg'])}" if scores['Msg'] else "")
@@ -564,22 +620,31 @@ with tab2:
                         r_prev_qoq = safe_val(p_is, p_is.index[4], ['Revenue']) if len(p_is) >= 5 else 0
                         qoq_g = (r_now - r_prev_qoq) / r_prev_qoq if r_prev_qoq > 0 else 0
                         
-                        shares = float(info.get('sharesOutstanding', 1) or 1)
+                        # ✅ shares: 優先 yfinance，失敗時用本地 BS 資料（避免預設 1 導致 DCF 飆高）
+                        shares = float(info.get('sharesOutstanding', 0) or 0)
+                        if shares <= 0:
+                            shares = get_historical_shares(p_bs, ld, 0)
+                        if shares <= 0:
+                            shares = 1  # 最後備消
                         hist_10y = stock.history(period="10y")
                         if hist_10y.index.tz:
                             hist_10y.index = hist_10y.index.tz_localize(None)
                         rng, avg_pe, min_pb, avg_pb = get_historical_metrics_local(p_is, p_bs, p_cf, hist_10y, shares)
-                        
+
                         c_pe = p / eps if eps > 0 else 0
                         eq_val = safe_val(p_bs, ld, ['EquityAttributableToOwnersOfParent'])
                         c_pb = p / (eq_val / shares) if eq_val > 0 else 0
-                        
+
                         debt = safe_val(p_bs, ld, ['CurrentLiabilities']) + safe_val(p_bs, ld, ['NoncurrentLiabilities'])
                         cash = safe_val(p_bs, ld, ['CashAndCashEquivalents'])
-                        ebitda = safe_val(p_is, ld, ['OperatingIncome']) + safe_val(p_cf, ld, ['Depreciation'])
-                        c_ev = ((p * shares) + debt - cash) / (ebitda * 4) if ebitda > 0 else 0
+                        # ✅ EV/EBITDA: 用 TTM + abs(Depreciation) 避免負値抗消
+                        ebitda_ttm = sum(
+                            safe_val(p_is, d, ['OperatingIncome']) + abs(safe_val(p_cf, d, ['Depreciation']))
+                            for d in p_is.index[:4]
+                        )
+                        c_ev = ((p * shares) + debt - cash) / ebitda_ttm if ebitda_ttm > 0 else 0
                         
-                        vals, g, wacc, roic = get_3_stage_valuation_local(p_is, p_bs, p_cf, shares, is_fin, real_g, info.get('beta', 1.0))
+                        vals, g, wacc, roic = get_3_stage_valuation_local(p_is, p_bs, p_cf, shares, is_fin, real_g, info.get('beta', 1.0), float(info.get('dividendRate', 0) or 0))
                         upside = (vals[0] - p) / p if vals[0] > 0 else -1
                         op_margins = [
                             safe_val(p_is, d, ['OperatingIncome']) / safe_val(p_is, d, ['Revenue'])
@@ -590,7 +655,7 @@ with tab2:
                         scores = calculate_scores(
                             info, real_g, qoq_g, upside, c_pe, c_ev, avg_pe, med_pe,
                             c_pb, min_pb, avg_pb, wacc, roic,
-                            debt / (ebitda * 4) if ebitda > 0 else 0, op_margins, real_industry
+                            debt / ebitda_ttm if ebitda_ttm > 0 else 0, op_margins, real_industry
                         )
                         status = (
                             f"{scores['Lifecycle']} | Q:{scores['Q']} V:{scores['V']} G:{scores['G']}"
@@ -611,7 +676,10 @@ with tab2:
                             'P/B (Lag)': round(c_pb, 2),
                             'P/S (Lag)': round(p / (op_rev * 4 / shares), 2) if op_rev > 0 else "-",
                             'EV/EBITDA': f"{c_ev:.1f}" if c_ev > 0 else "-",
-                            'DCF合理價區間': f"{vals[0]:.1f} ({vals[1]:.1f}-{vals[2]:.1f})",
+                            '預估P/E區間': f"{vals[1]/eps:.1f}-{vals[2]/eps:.1f}" if eps > 0 and vals[1] > 0 else "-",
+                            '預估P/B區間': f"{vals[1]/(eq_val/shares):.1f}-{vals[2]/(eq_val/shares):.1f}" if eq_val > 0 and vals[1] > 0 else "-",
+                            '預估P/S區間': f"{vals[1]/(rev_ttm/shares):.1f}-{vals[2]/(rev_ttm/shares):.1f}" if rev_ttm > 0 and shares > 0 and vals[1] > 0 else "-",
+                            'DCF/DDM合理價區間': f"{vals[0]:.1f} ({vals[1]:.1f}-{vals[2]:.1f})",
                             '狀態': status,
                             'vs產業PE': "低於同業" if c_pe < med_pe else "高於同業",
                             '選股邏輯': f"Score: {int(scores['Total'])}" + (" (首選)" if scores['Total'] >= 70 else "")
