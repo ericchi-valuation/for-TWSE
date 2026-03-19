@@ -388,7 +388,7 @@ def run_pit_backtest_local(sym, target_date, is_finance, industry_name):
 # UI 介面
 # ==========================================
 st.title("V7.4 Eric Chi 估值模型 (真實市值極速版)")
-tab1, tab2, tab3 = st.tabs(["全產業掃描", "單股深度查詢", "真·時光機回測"])
+tab1, tab2, tab3, tab4 = st.tabs(["全產業掃描", "單股深度查詢", "真·時光機回測", "⏳ 時點回測×全產業掃描"])
 cols_display = ['股票代碼', '名稱', '現價', '營收成長率', '預估EPS', '營業利益率', '淨利率',
                 'P/E (TTM)', 'P/B (Lag)', 'P/S (Lag)', 'EV/EBITDA', 'DCF/DDM合理價區間',
                 '預估P/E區間', '預估P/B區間', '預估P/S區間', '狀態', 'vs產業PE', '選股邏輯']
@@ -742,3 +742,137 @@ with tab3:
             col_m1.metric("平均報酬", f"{avg_raw*100:.1f}%")
             col_m2.metric("採樣股票數", f"{len(df_bt)} 檔")
             st.dataframe(df_bt.drop(columns=['Raw']), use_container_width=True)
+
+# ==========================================
+# Tab 4. 時點回測 × 全產業掃描
+# ==========================================
+with tab4:
+    st.info(
+        "⏳ **時點回測 × 全產業掃描**：選定一個過去的時間點，掃描全產業（依真實市值篩選前 50% 領頭羊），"
+        "以當時財報與股價計算估值分數，並回看進場後的實際報酬表現。"
+    )
+    if df_all.empty:
+        st.error("❌ 找不到本地資料庫 (tw_stock_list.csv)。")
+    else:
+        col_a, col_b, col_c = st.columns([2, 1, 1])
+        with col_a:
+            all_inds_sorted = sorted(df_all['Industry'].unique().tolist())
+            scan_all_inds = st.checkbox("掃描全部產業（速度較慢）", value=False)
+            if not scan_all_inds:
+                pit_selected_inds = st.multiselect(
+                    "選擇掃描產業 (可多選):",
+                    all_inds_sorted,
+                    default=["半導體業"],
+                    key="tab4_inds"
+                )
+            else:
+                pit_selected_inds = all_inds_sorted
+                st.caption(f"共 {len(all_inds_sorted)} 個產業將被掃描")
+        with col_b:
+            pit_date = st.date_input(
+                "回測進場時間點:",
+                datetime(2022, 10, 25),
+                key="tab4_date"
+            )
+        with col_c:
+            min_score = st.number_input("最低總分門檻:", min_value=0, max_value=100, value=50, step=5, key="tab4_minscore")
+            top_n = st.number_input("每產業顯示前 N 名:", min_value=1, max_value=20, value=5, step=1, key="tab4_topn")
+
+        run_pit_scan = st.button("🚀 執行時點回測全產業掃描", type="primary", key="tab4_run")
+
+        if run_pit_scan and pit_selected_inds:
+            pit_date_str = pit_date.strftime('%Y-%m-%d')
+            pit_dt = pd.to_datetime(pit_date_str)
+
+            pb4 = st.progress(0)
+            status4 = st.empty()
+            results4_container = st.container()
+            all_pit_data = []
+
+            for idx4, ind4 in enumerate(pit_selected_inds):
+                status4.text(f"[{idx4+1}/{len(pit_selected_inds)}] 批量預取 [{ind4}] 市值排序...")
+                tickers4 = df_all[df_all["Industry"] == ind4]["Ticker"].tolist()
+
+                # 批次取最新收盤作為市值排序依據（用現在的市值粗篩領頭羊）
+                try:
+                    bulk4 = yf.download(tickers4, period="5d", progress=False)
+                    latest4 = parse_bulk_close(bulk4, tickers4)
+                except Exception:
+                    latest4 = pd.Series(dtype=float)
+
+                caps4 = []
+                for t4 in tickers4:
+                    clean4 = str(t4).replace('.TW', '').replace('.TWO', '')
+                    s_bs4 = DB_BS[
+                        (DB_BS['stock_id'].astype(str) == clean4) &
+                        (DB_BS['type'].isin(['OrdinaryShare', 'CapitalStock', 'OrdinaryShare_per', 'CapitalStock_per']))
+                    ]
+                    sh4 = float(s_bs4['value'].iloc[0]) / 10.0 if not s_bs4.empty else 1.0
+                    pr4 = float(latest4.get(t4, 0) or 0)
+                    if pd.isna(pr4): pr4 = 0.0
+                    caps4.append((t4, pr4 * sh4))
+
+                targets4 = [x[0] for x in sorted(caps4, key=lambda x: x[1], reverse=True)[:max(len(caps4)//2, 1)]]
+
+                status4.text(f"[{idx4+1}/{len(pit_selected_inds)}] 執行 [{ind4}] 時點回測 ({len(targets4)} 檔)...")
+                ind_pit_results = []
+                for sym4 in targets4:
+                    is_fin4 = any(x in ind4 for x in ["金融", "保險"])
+                    r4 = run_pit_backtest_local(sym4, pit_date_str, is_fin4, ind4)
+                    if r4 and r4.get('當時總分', 0) >= min_score:
+                        r4['產業'] = ind4
+                        ind_pit_results.append(r4)
+
+                if ind_pit_results:
+                    df_ind4 = (
+                        pd.DataFrame(ind_pit_results)
+                        .sort_values('當時總分', ascending=False)
+                        .head(int(top_n))
+                    )
+                    all_pit_data.extend(df_ind4.to_dict('records'))
+                    with results4_container:
+                        st.markdown(f"### 🏆 {ind4}")
+                        show_cols4 = ['代碼', '名稱', '產業', '進場日', '進場價', '現價',
+                                      '當時總分', '當時狀態', '當時合理價(Base)', '當時PE',
+                                      '3個月', '6個月', '12個月', '至今報酬']
+                        display_cols4 = [c for c in show_cols4 if c in df_ind4.columns]
+                        st.dataframe(df_ind4[display_cols4], use_container_width=True)
+                else:
+                    with results4_container:
+                        st.warning(f"⚠️ [{ind4}] 在此時間點無達標股票（門檻 {min_score} 分）")
+
+                pb4.progress((idx4 + 1) / len(pit_selected_inds))
+
+            status4.text("✅ 完成！")
+
+            if all_pit_data:
+                df_all_pit = pd.DataFrame(all_pit_data).sort_values('當時總分', ascending=False)
+                raw_vals = pd.to_numeric(df_all_pit['Raw'], errors='coerce').dropna()
+
+                st.divider()
+                st.subheader("📊 全產業彙整排行")
+                m1, m2, m3, m4 = st.columns(4)
+                m1.metric("掃描股票數", f"{len(df_all_pit)} 檔")
+                m2.metric("平均至今報酬", f"{raw_vals.mean()*100:.1f}%" if not raw_vals.empty else "-")
+                m3.metric("正報酬比例", f"{(raw_vals > 0).sum()}/{len(raw_vals)}" if not raw_vals.empty else "-")
+                m4.metric("最高報酬", f"{raw_vals.max()*100:.1f}%" if not raw_vals.empty else "-")
+
+                show_cols_all = ['代碼', '名稱', '產業', '進場日', '進場價', '現價',
+                                 '當時總分', '當時狀態', '當時合理價(Base)', '當時PE',
+                                 '3個月', '6個月', '12個月', '至今報酬']
+                display_cols_all = [c for c in show_cols_all if c in df_all_pit.columns]
+                st.dataframe(df_all_pit[display_cols_all].reset_index(drop=True), use_container_width=True)
+
+                # Excel 下載
+                buf4 = io.BytesIO()
+                export4 = df_all_pit[display_cols_all]
+                with pd.ExcelWriter(buf4, engine='xlsxwriter') as writer4:
+                    export4.to_excel(writer4, index=False, sheet_name='時點回測全產業')
+                st.download_button(
+                    "📥 下載 Excel（全產業時點回測）",
+                    data=buf4.getvalue(),
+                    file_name=f"PIT_Scan_{pit_date_str}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    type="primary",
+                    key="tab4_dl"
+                )
