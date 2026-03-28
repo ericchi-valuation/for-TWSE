@@ -20,8 +20,10 @@ warnings.simplefilter(action='ignore', category=FutureWarning)
 # ==========================================
 @st.cache_data(show_spinner=False)
 def get_qualitative_report(base_dir, ticker):
+    """自動搜尋 My-TW-Coverage（含解壓縮後多層資料夾），讀取個股質化報告。"""
     clean_ticker = str(ticker).replace('.TW', '').replace('.TWO', '')
-    search_path = os.path.join(base_dir, "Pilot_Reports", "**", f"{clean_ticker}_*.md")
+    # 用 ** 跨越多層資料夾（包含 My-TW-Coverage-master 等 ZIP 解壓縮後的子資料夾）
+    search_path = os.path.join(base_dir, "**", f"{clean_ticker}_*.md")
     matched_files = glob.glob(search_path, recursive=True)
     if not matched_files:
         return None
@@ -31,7 +33,7 @@ def get_qualitative_report(base_dir, ticker):
         with open(file_path, 'r', encoding='utf-8') as f:
             content = f.read()
         
-        # 簡易擷取：提取 "## 業務簡介" 到 "## 財務概況" 之間的內容
+        # 擷取 "## 業務簡介" 到 "## 財務概況" 之間（排除已過時的財務表格，app.py 算得更準）
         start_marker = "## 業務簡介"
         end_marker = "## 財務概況"
         
@@ -43,7 +45,7 @@ def get_qualitative_report(base_dir, ticker):
             else:
                 return content[start_idx:].strip()
         else:
-            return content
+            return content.strip()
     except Exception as e:
         return f"讀取質化資料時發生錯誤: {e}"
 
@@ -256,14 +258,30 @@ def get_3_stage_valuation_local(p_is, p_bs, p_cf, shares, is_fin, real_g, beta, 
         # ==========================================
         # 非金融業：三階段 DCF
         # ==========================================
-        # ✅ 兩層 FCF 備援
-        # 層 1：TTM FCF = 近 4 季 FCF 嚴格加總（不過濾正負，反映真實自由現金流）
-        fcf_ttm = sum(
-            safe_val(p_cf, d, ['CashFlowsFromOperatingActivities', 'NetCashInflowFromOperatingActivities'])
-            + safe_val(p_cf, d, ['CashProvidedByInvestingActivities'])
-            for d in p_is.index[:4]
-        )
-        # 層 2：TTM 營業利益 × 70%
+        # ✅ FCF TTM 精確計算（去累計化）
+        # 台灣財報現金流量表是「年度累計值」，不能直接加總四季！
+        # 正確做法：取近4季各自的「單季獨立值」後再加總
+        def get_single_quarter_cf(p_cf_df, dates, keys):
+            """將累計現金流量轉為單季值後加總，避免 Q4 值被重複計算 2.5 倍。"""
+            total = 0.0
+            for i, d in enumerate(dates[:4]):
+                month = d.month if hasattr(d, 'month') else pd.to_datetime(d).month
+                val = safe_val(p_cf_df, d, keys)
+                if month == 12:  # Q4：全年累計值，直接使用
+                    total += val
+                else:
+                    # 非 Q4：減去上一季的累計值，得到本季單季值
+                    prev_date = dates[i + 1] if (i + 1) < len(dates) else None
+                    prev_val = safe_val(p_cf_df, prev_date, keys) if prev_date is not None else 0
+                    total += (val - prev_val)
+            return total
+
+        all_dates = p_is.index.tolist()
+        ocf_ttm = get_single_quarter_cf(p_cf, all_dates, ['CashFlowsFromOperatingActivities', 'NetCashInflowFromOperatingActivities'])
+        icf_ttm = get_single_quarter_cf(p_cf, all_dates, ['CashProvidedByInvestingActivities'])
+        fcf_ttm = ocf_ttm + icf_ttm
+
+        # 層 2 備援：TTM 營業利益 × 70%
         op_inc_ttm = sum(safe_val(p_is, d, ['OperatingIncome']) for d in p_is.index[:4])
 
         if fcf_ttm > 0:
