@@ -4,15 +4,48 @@ import pandas as pd
 import numpy as np
 import os
 import io
+import glob
 
 from datetime import datetime, timedelta
 import warnings
 
-st.set_page_config(page_title="V7.4 Eric Chi 估值模型 (真實市值極速版)", page_icon="🏦", layout="wide")
+st.set_page_config(page_title="V7.5 Eric Chi 估值模型 (真實市值極速版)", page_icon="🏦", layout="wide")
 warnings.simplefilter(action='ignore', category=FutureWarning)
 
 # ✅ V7.5: 新版 yfinance (>=0.2.38) 已內建 curl_cffi 防封鎖
 # 不再接受 requests.Session，由 yfinance 自動管理連線
+
+# ==========================================
+# ✅ My-TW-Coverage 質化資料讀取
+# ==========================================
+@st.cache_data(show_spinner=False)
+def get_qualitative_report(base_dir, ticker):
+    clean_ticker = str(ticker).replace('.TW', '').replace('.TWO', '')
+    search_path = os.path.join(base_dir, "Pilot_Reports", "**", f"{clean_ticker}_*.md")
+    matched_files = glob.glob(search_path, recursive=True)
+    if not matched_files:
+        return None
+    
+    file_path = matched_files[0]
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+        
+        # 簡易擷取：提取 "## 業務簡介" 到 "## 財務概況" 之間的內容
+        start_marker = "## 業務簡介"
+        end_marker = "## 財務概況"
+        
+        if start_marker in content:
+            start_idx = content.find(start_marker)
+            end_idx = content.find(end_marker, start_idx)
+            if end_idx != -1:
+                return content[start_idx:end_idx].strip()
+            else:
+                return content[start_idx:].strip()
+        else:
+            return content
+    except Exception as e:
+        return f"讀取質化資料時發生錯誤: {e}"
 
 # ==========================================
 # 1. 讀取本地三大金庫 (Parquet 極速版)
@@ -223,9 +256,22 @@ def get_3_stage_valuation_local(p_is, p_bs, p_cf, shares, is_fin, real_g, beta, 
         # ==========================================
         # 非金融業：三階段 DCF
         # ==========================================
-        op_cf = safe_val(p_cf, ld, ['CashFlowsFromOperatingActivities', 'NetCashInflowFromOperatingActivities'])
-        inv_cf = safe_val(p_cf, ld, ['CashProvidedByInvestingActivities'])
-        fcf = op_cf + inv_cf if (op_cf + inv_cf) > 0 else op_inc * 0.7
+        # ✅ 兩層 FCF 備援
+        # 層 1：TTM FCF = 近 4 季 FCF 嚴格加總（不過濾正負，反映真實自由現金流）
+        fcf_ttm = sum(
+            safe_val(p_cf, d, ['CashFlowsFromOperatingActivities', 'NetCashInflowFromOperatingActivities'])
+            + safe_val(p_cf, d, ['CashProvidedByInvestingActivities'])
+            for d in p_is.index[:4]
+        )
+        # 層 2：TTM 營業利益 × 70%
+        op_inc_ttm = sum(safe_val(p_is, d, ['OperatingIncome']) for d in p_is.index[:4])
+
+        if fcf_ttm > 0:
+            fcf = fcf_ttm
+        elif op_inc_ttm > 0:
+            fcf = op_inc_ttm * 0.7
+        else:
+            fcf = 0
 
         int_exp = abs(safe_val(p_cf, ld, ['InterestExpense', 'PayTheInterest']) or safe_val(p_is, ld, ['TotalNonoperatingIncomeAndExpense']))
         kd = int_exp / debt if debt > 0 else 0.025
@@ -391,7 +437,7 @@ st.title("V7.4 Eric Chi 估值模型 (真實市值極速版)")
 tab1, tab2, tab3, tab4 = st.tabs(["全產業掃描", "單股深度查詢", "真·時光機回測", "⏳ 時點回測×全產業掃描"])
 cols_display = ['股票代碼', '名稱', '現價', '營收成長率', '預估EPS', '營業利益率', '淨利率',
                 'P/E (TTM)', 'P/B (Lag)', 'P/S (Lag)', 'EV/EBITDA', 'DCF/DDM合理價區間',
-                '預估P/E區間', '預估P/B區間', '預估P/S區間', '狀態', 'vs產業PE', '選股邏輯']
+                '歷史P/E區間', '歷史P/B區間', '歷史P/S區間', '狀態', 'vs產業PE', '選股邏輯']
 
 # ==========================================
 # Tab 1. 全產業掃描
@@ -528,9 +574,9 @@ with tab1:
                             'P/B (Lag)': round(c_pb, 2),
                             'P/S (Lag)': round(p / (op_rev * 4 / shares), 2) if op_rev > 0 else "-",
                             'EV/EBITDA': f"{c_ev:.1f}" if c_ev > 0 else "-",
-                            '預估P/E區間': f"{vals[1]/eps:.1f}-{vals[2]/eps:.1f}" if eps > 0 and vals[1] > 0 else "-",
-                            '預估P/B區間': f"{vals[1]/(eq_val/shares):.1f}-{vals[2]/(eq_val/shares):.1f}" if eq_val > 0 and vals[1] > 0 else "-",
-                            '預估P/S區間': f"{vals[1]/(rev_ttm/shares):.1f}-{vals[2]/(rev_ttm/shares):.1f}" if rev_ttm > 0 and shares > 0 and vals[1] > 0 else "-",
+                            '歷史P/E區間': rng[0],
+                            '歷史P/B區間': rng[1],
+                            '歷史P/S區間': rng[2],
                             'DCF/DDM合理價區間': f"{vals[0]:.1f} ({vals[1]:.1f}-{vals[2]:.1f})",
                             '狀態': (
                                 f"{scores['Lifecycle']} | Q:{scores['Q']} V:{scores['V']} G:{scores['G']}"
@@ -676,9 +722,9 @@ with tab2:
                             'P/B (Lag)': round(c_pb, 2),
                             'P/S (Lag)': round(p / (op_rev * 4 / shares), 2) if op_rev > 0 else "-",
                             'EV/EBITDA': f"{c_ev:.1f}" if c_ev > 0 else "-",
-                            '預估P/E區間': f"{vals[1]/eps:.1f}-{vals[2]/eps:.1f}" if eps > 0 and vals[1] > 0 else "-",
-                            '預估P/B區間': f"{vals[1]/(eq_val/shares):.1f}-{vals[2]/(eq_val/shares):.1f}" if eq_val > 0 and vals[1] > 0 else "-",
-                            '預估P/S區間': f"{vals[1]/(rev_ttm/shares):.1f}-{vals[2]/(rev_ttm/shares):.1f}" if rev_ttm > 0 and shares > 0 and vals[1] > 0 else "-",
+                            '歷史P/E區間': rng[0],
+                            '歷史P/B區間': rng[1],
+                            '歷史P/S區間': rng[2],
                             'DCF/DDM合理價區間': f"{vals[0]:.1f} ({vals[1]:.1f}-{vals[2]:.1f})",
                             '狀態': status,
                             'vs產業PE': "低於同業" if c_pe < med_pe else "高於同業",
@@ -692,6 +738,15 @@ with tab2:
                                 pd.DataFrame([{k: data[k] for k in cols_display if k in data}]).T,
                                 use_container_width=True
                             )
+                        
+                        # === 新增：讀取 My-TW-Coverage 的質化資料 ===
+                        st.divider()
+                        st.subheader("📖 企業基本面與供應鏈 (來源: My-TW-Coverage)")
+                        md_content = get_qualitative_report("My-TW-Coverage", sym)
+                        if md_content:
+                            st.markdown(md_content)
+                        else:
+                            st.info("尚無此標的的質化分析資料。")
                 except Exception as e:
                     st.error(f"查詢報錯: {e}")
 
