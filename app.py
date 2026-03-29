@@ -351,19 +351,27 @@ def get_3_stage_valuation_local(p_is, p_bs, p_cf, shares, is_fin, real_g, beta, 
         # 台灣財報現金流量表是「年度累計值」，不能直接加總四季！
         # 正確做法：取近4季各自的「單季獨立值」後再加總
         def get_single_quarter_cf(p_cf_df, dates, keys):
-            """將累計現金流量轉為單季值後加總，避免 Q4 值被重複計算 2.5 倍。"""
+            """將累計現金流量轉為單季值後加總，避免 Q4 值被重複計算。
+            台灣財報規則：
+              Q1 (3月)：即單季值（非累計），直接使用
+              Q2 (6月)：累計 Q1+Q2，需減去 Q1
+              Q3 (9月)：累計 Q1+Q2+Q3，需減去 Q2 累計
+              Q4 (12月)：全年累計，直接使用
+            """
             total = 0.0
             for i, d in enumerate(dates[:4]):
                 month = d.month if hasattr(d, 'month') else pd.to_datetime(d).month
                 val = safe_val(p_cf_df, d, keys)
-                if month == 12:  # Q4：全年累計值，直接使用
+                if month == 3 or month == 12:
+                    # Q1：本身即單季值；Q4：全年累計，直接使用
                     total += val
                 else:
-                    # 非 Q4：減去上一季的累計值，得到本季單季值
+                    # Q2, Q3：年度累計值，減去上一季的累計值，得到單季值
                     prev_date = dates[i + 1] if (i + 1) < len(dates) else None
                     prev_val = safe_val(p_cf_df, prev_date, keys) if prev_date is not None else 0
                     total += (val - prev_val)
             return total
+
 
         all_dates = p_is.index.tolist()
         ocf_ttm = get_single_quarter_cf(p_cf, all_dates, ['CashFlowsFromOperatingActivities', 'NetCashInflowFromOperatingActivities'])
