@@ -157,6 +157,43 @@ def load_local_databases():
 
 df_all, DB_IS, DB_BS, DB_CF = load_local_databases()
 
+@st.cache_data(show_spinner=False)
+def load_monthly_rev_db():
+    """載入月營收 Parquet，回傳以 stock_id 為 key 的 DataFrame。"""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'tw_monthly_rev.parquet')
+    if not os.path.exists(path):
+        return pd.DataFrame()
+    df = pd.read_parquet(path)
+    df['date'] = pd.to_datetime(df['date'])
+    return df
+
+DB_MR = load_monthly_rev_db()
+
+def get_monthly_rev_growth(ticker):
+    """從月營收 DB 計算最新累積年增率（YTD YoY）。
+    優先取最近 2 個月的 YTD 做比較（避免單月波動太大）。
+    回傳 float 或 None（無資料時）。"""
+    if DB_MR.empty:
+        return None
+    clean = str(ticker).replace('.TW', '').replace('.TWO', '')
+    df = DB_MR[DB_MR['stock_id'].astype(str) == clean].copy()
+    if df.empty:
+        return None
+    df = df.sort_values('date')
+    ly = int(df.iloc[-1]['date'].year)
+    lm = int(df.iloc[-1]['date'].month)
+    # 年初資料不穩定保護：至少需要 3 個月才計算，避免單月雜訊太大
+    months_this_yr = int((df['date'].dt.year == ly).sum())
+    if months_this_yr < 3:
+        return None
+    # YTD current year (1月 ~ 最新月)
+    rev_ytd = float(df[(df['date'].dt.year == ly) & (df['date'].dt.month <= lm)]['revenue'].sum())
+    # YTD same period last year
+    rev_ytd_py = float(df[(df['date'].dt.year == (ly - 1)) & (df['date'].dt.month <= lm)]['revenue'].sum())
+    if rev_ytd_py > 0 and rev_ytd > 0:
+        return (rev_ytd - rev_ytd_py) / rev_ytd_py
+    return None
+
 IND_PE_DEFAULT = {
     "半導體業": 25.0, "金融業": 14.0, "航運業": 10.0,
     "生技醫療業": 35.0, "鋼鐵工業": 12.0, "電子零組件業": 20.0,
@@ -184,6 +221,27 @@ def safe_val(df, idx_date, keys, default=0):
 def get_historical_shares(p_bs, date, fallback_shares):
     cap = safe_val(p_bs, date, ['OrdinaryShare', 'CapitalStock', 'OrdinaryShare_per', 'CapitalStock_per'])
     return cap / 10.0 if cap > 0 else fallback_shares
+
+def get_single_quarter_cf(p_cf_df, dates, keys):
+    """將累計現金流量與折舊轉為單季值後加總(TTM)，避免跨年或例外值干擾。"""
+    total = 0.0
+    for i, d in enumerate(dates[:4]):
+        month = d.month if hasattr(d, 'month') else pd.to_datetime(d).month
+        val = safe_val(p_cf_df, d, keys)
+        if month == 3:
+            total += val
+        else:
+            prev_date = dates[i + 1] if (i + 1) < len(dates) else None
+            # 確保 prev_date 是同一年，否則減去錯誤基準會導致負值
+            prev_year = prev_date.year if (prev_date is not None and hasattr(prev_date, 'year')) else None
+            curr_year = d.year if hasattr(d, 'year') else pd.to_datetime(d).year
+            prev_val = safe_val(p_cf_df, prev_date, keys) if prev_year == curr_year else 0
+            single_q = val - prev_val
+            # 跨年邊界保護：若相減後為負，代表跨年、缺漏或異常，根據建議改用當季原值
+            if single_q < 0:
+                single_q = val
+            total += single_q
+    return total
 
 # ==========================================
 # ✅ FIX A: yf.download 最新價格統一解析器
@@ -348,29 +406,6 @@ def get_3_stage_valuation_local(p_is, p_bs, p_cf, shares, is_fin, real_g, beta, 
         # 非金融業：三階段 DCF
         # ==========================================
         # ✅ FCF TTM 精確計算（去累計化）
-        # 台灣財報現金流量表是「年度累計值」，不能直接加總四季！
-        # 正確做法：取近4季各自的「單季獨立值」後再加總
-        def get_single_quarter_cf(p_cf_df, dates, keys):
-            """將累計現金流量轉為單季值後加總，避免 Q4 值被重複計算。
-            台灣財報規則：
-              Q1 (3月)：即單季值（非累計），直接使用
-              Q2 (6月)：累計 Q1+Q2，需減去 Q1
-              Q3 (9月)：累計 Q1+Q2+Q3，需減去 Q2 累計
-              Q4 (12月)：全年累計，直接使用
-            """
-            total = 0.0
-            for i, d in enumerate(dates[:4]):
-                month = d.month if hasattr(d, 'month') else pd.to_datetime(d).month
-                val = safe_val(p_cf_df, d, keys)
-                if month == 3 or month == 12:
-                    # Q1：本身即單季值；Q4：全年累計，直接使用
-                    total += val
-                else:
-                    # Q2, Q3：年度累計值，減去上一季的累計值，得到單季值
-                    prev_date = dates[i + 1] if (i + 1) < len(dates) else None
-                    prev_val = safe_val(p_cf_df, prev_date, keys) if prev_date is not None else 0
-                    total += (val - prev_val)
-            return total
 
 
         all_dates = p_is.index.tolist()
@@ -425,8 +460,16 @@ def calculate_scores(info, real_g, qoq_g, upside, cur_pe, cur_ev, avg_pe, med_pe
     elif len(op_m) >= 2 and op_m[0] < op_m[1]: s['Q'] -= 1; s['Msg'].append("營益率降")
     
     dy = float(info.get('dividendYield', 0) or 0)
-    if dy > 0.06: s['Q'] += 2
-    elif dy > 0.03: s['Q'] += 1
+    cur_pe_safe = cur_pe if cur_pe and cur_pe > 0 else 0
+    # 配息率防護：若配息率 > 100%（EPS 撐不住配息）或 EPS < 0，視為財務警訊而非加分
+    payout = dy * cur_pe_safe if cur_pe_safe > 0 else 999
+    if payout > 1.2 or cur_pe_safe == 0:
+        if dy > 0:
+            s['Msg'].append("配息率異常")
+    elif dy > 0.06:
+        s['Q'] += 2
+    elif dy > 0.03:
+        s['Q'] += 1
 
     if is_cyclical:
         if min_pb > 0 and 0 < cur_pb < (min_pb * 1.1): s['V'] += 4
@@ -491,7 +534,7 @@ def run_pit_backtest_local(sym, target_date, is_finance, industry_name):
         real_growth = (rev_ttm - prev_rev) / prev_rev if prev_rev > 0 else 0.05
         
         r_now = safe_val(p_is, valid_dates[0], ['Revenue'])
-        r_prev = safe_val(p_is, valid_dates[1], ['Revenue']) if len(valid_dates) > 1 else 0
+        r_prev = safe_val(p_is, valid_dates[4], ['Revenue']) if len(valid_dates) >= 5 else 0
         qoq_growth = (r_now - r_prev) / r_prev if r_prev > 0 else 0
         op_margins = [safe_val(p_is, d, ['OperatingIncome']) / safe_val(p_is, d, ['Revenue']) for d in valid_dates[:4] if safe_val(p_is, d, ['Revenue']) > 0]
 
@@ -504,7 +547,9 @@ def run_pit_backtest_local(sym, target_date, is_finance, industry_name):
         equity = safe_val(p_bs, ld, ['EquityAttributableToOwnersOfParent'], 1)
         debt = safe_val(p_bs, ld, ['CurrentLiabilities']) + safe_val(p_bs, ld, ['NoncurrentLiabilities'])
         cash = safe_val(p_bs, ld, ['CashAndCashEquivalents'])
-        ttm_ebitda = np.mean([(safe_val(p_is, d, ['OperatingIncome']) + safe_val(p_cf, d, ['Depreciation'])) for d in valid_dates[:4]]) * 4
+        op_ttm = sum(safe_val(p_is, d, ['OperatingIncome']) for d in valid_dates[:4])
+        dep_ttm = get_single_quarter_cf(p_cf, valid_dates, ['Depreciation'])
+        ttm_ebitda = op_ttm + abs(dep_ttm)
         
         cur_pb = ep / (equity / hist_shares) if equity > 0 else 0
         cur_pe = ep / eps_ttm if eps_ttm > 0 else 0
@@ -625,7 +670,10 @@ with tab1:
                         # ✅ TTM YoY: 近四季累積營收 vs 去年同期四季累積
                         rev_ttm  = sum(safe_val(p_is, d, ['Revenue']) for d in p_is.index[:4])
                         rev_prev = sum(safe_val(p_is, d, ['Revenue']) for d in p_is.index[4:8]) if len(p_is) >= 8 else 0
-                        real_g = (rev_ttm - rev_prev) / rev_prev if rev_prev > 0 else 0
+                        real_g_q = (rev_ttm - rev_prev) / rev_prev if rev_prev > 0 else 0
+                        # ✅ 月營收累計年增率覆蓋（比季報更準確，且能偵測 KY 股混用年/季資料的失真）
+                        real_g_m = get_monthly_rev_growth(sym)
+                        real_g   = real_g_m if real_g_m is not None else real_g_q
                         # QoQ 動能: 最新單季 vs 去年同季
                         r_now = safe_val(p_is, p_is.index[0], ['Revenue'])
                         r_prev_qoq = safe_val(p_is, p_is.index[4], ['Revenue']) if len(p_is) >= 5 else 0
@@ -650,11 +698,10 @@ with tab1:
 
                         debt = safe_val(p_bs, ld, ['CurrentLiabilities']) + safe_val(p_bs, ld, ['NoncurrentLiabilities'])
                         cash = safe_val(p_bs, ld, ['CashAndCashEquivalents'])
-                        # ✅ EV/EBITDA: 用 TTM + abs(Depreciation) 避免負値抗消
-                        ebitda_ttm = sum(
-                            safe_val(p_is, d, ['OperatingIncome']) + abs(safe_val(p_cf, d, ['Depreciation']))
-                            for d in p_is.index[:4]
-                        )
+                        # ✅ EV/EBITDA: 用 TTM + 準確去累積折舊 避免負値抗消與累積疊加
+                        op_ttm = sum(safe_val(p_is, d, ['OperatingIncome']) for d in p_is.index[:4])
+                        dep_ttm = get_single_quarter_cf(p_cf, p_is.index, ['Depreciation'])
+                        ebitda_ttm = op_ttm + abs(dep_ttm)
                         c_ev = ((p * shares) + debt - cash) / ebitda_ttm if ebitda_ttm > 0 else 0
                         
                         is_fin = any(x in ind for x in ["金融", "保險"])
@@ -798,11 +845,10 @@ with tab2:
 
                         debt = safe_val(p_bs, ld, ['CurrentLiabilities']) + safe_val(p_bs, ld, ['NoncurrentLiabilities'])
                         cash = safe_val(p_bs, ld, ['CashAndCashEquivalents'])
-                        # ✅ EV/EBITDA: 用 TTM + abs(Depreciation) 避免負値抗消
-                        ebitda_ttm = sum(
-                            safe_val(p_is, d, ['OperatingIncome']) + abs(safe_val(p_cf, d, ['Depreciation']))
-                            for d in p_is.index[:4]
-                        )
+                        # ✅ EV/EBITDA: 用 TTM + 準確去累積折舊 避免負値抗消與累積疊加
+                        op_ttm = sum(safe_val(p_is, d, ['OperatingIncome']) for d in p_is.index[:4])
+                        dep_ttm = get_single_quarter_cf(p_cf, p_is.index, ['Depreciation'])
+                        ebitda_ttm = op_ttm + abs(dep_ttm)
                         c_ev = ((p * shares) + debt - cash) / ebitda_ttm if ebitda_ttm > 0 else 0
                         
                         vals, g, wacc, roic = get_3_stage_valuation_local(p_is, p_bs, p_cf, shares, is_fin, real_g, info.get('beta', 1.0), float(info.get('dividendRate', 0) or 0))
@@ -876,7 +922,9 @@ with tab2:
 
                         # === 供應鏈網路圖 ===
                         if md_content:
-                            wikilinks = list(set(re.findall(r'\[\[([^\]]+)\]\]', md_content)))
+                            # [[CompanyName|DisplayText]] 格式支援：只取 | 前的純名稱
+                            raw_links = re.findall(r'\[\[([^\]]+)\]\]', md_content)
+                            wikilinks = list({w.split('|')[0].strip() for w in raw_links})
                             graph_data_raw = load_graph_data("My-TW-Coverage")
                             net_html = build_stock_network_html(graph_data_raw, wikilinks)
                             if net_html:
@@ -985,9 +1033,11 @@ with tab4:
                 status4.text(f"[{idx4+1}/{len(pit_selected_inds)}] 批量預取 [{ind4}] 市值排序...")
                 tickers4 = df_all[df_all["Industry"] == ind4]["Ticker"].tolist()
 
-                # 批次取最新收盤作為市值排序依據（用現在的市值粗篩領頭羊）
+                # 批次取當時收盤的市值排序依據（用完全不穿越時空的市值粗篩領頭羊）
                 try:
-                    bulk4 = yf.download(tickers4, period="5d", progress=False)
+                    pit_dt_start = (pit_dt - pd.Timedelta(days=10)).strftime('%Y-%m-%d')
+                    pit_dt_end = (pit_dt + pd.Timedelta(days=1)).strftime('%Y-%m-%d')
+                    bulk4 = yf.download(tickers4, start=pit_dt_start, end=pit_dt_end, progress=False)
                     latest4 = parse_bulk_close(bulk4, tickers4)
                 except Exception:
                     latest4 = pd.Series(dtype=float)
@@ -1179,10 +1229,11 @@ with tab5:
                     c_pb5   = p5 / (eq_val5 / shares5) if eq_val5 > 0 else 0
                     debt5   = safe_val(p_bs5, ld5, ['CurrentLiabilities']) + safe_val(p_bs5, ld5, ['NoncurrentLiabilities'])
                     cash5   = safe_val(p_bs5, ld5, ['CashAndCashEquivalents'])
-                    ebitda5 = sum(
-                        safe_val(p_is5, d, ['OperatingIncome']) + abs(safe_val(p_cf5, d, ['Depreciation']))
-                        for d in p_is5.index[:4]
-                    )
+                    
+                    op_ttm5 = sum(safe_val(p_is5, d, ['OperatingIncome']) for d in p_is5.index[:4])
+                    dep_ttm5 = get_single_quarter_cf(p_cf5, p_is5.index, ['Depreciation'])
+                    ebitda5 = op_ttm5 + abs(dep_ttm5)
+                    
                     c_ev5 = ((p5 * shares5) + debt5 - cash5) / ebitda5 if ebitda5 > 0 else 0
 
                     vals5, g5, wacc5, roic5 = get_3_stage_valuation_local(
@@ -1195,8 +1246,13 @@ with tab5:
                         for d in p_is5.index[:4] if safe_val(p_is5, d, ['Revenue']) > 0
                     ]
                     de5 = debt5 / ebitda5 if ebitda5 > 0 else 0
+                    
+                    r_now5 = safe_val(p_is5, p_is5.index[0], ['Revenue'])
+                    r_prev_qoq5 = safe_val(p_is5, p_is5.index[4], ['Revenue']) if len(p_is5) >= 5 else 0
+                    qoq_g5 = (r_now5 - r_prev_qoq5) / r_prev_qoq5 if r_prev_qoq5 > 0 else 0
+                    
                     scores5 = calculate_scores(
-                        info5, real_g5, 0, upside5, c_pe5, c_ev5, avg_pe5, med_pe5,
+                        info5, real_g5, qoq_g5, upside5, c_pe5, c_ev5, avg_pe5, med_pe5,
                         c_pb5, min_pb5, avg_pb5, wacc5, roic5, de5, op_margins5, ind5
                     )
                     if scores5['Total'] < min_score_t5:
