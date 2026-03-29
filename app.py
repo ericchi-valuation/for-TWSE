@@ -281,6 +281,13 @@ def parse_bulk_close(bulk_data, tickers_list):
         return pd.Series(dtype=float)
 
 
+def get_stock_name(sym, info):
+    if not df_all.empty:
+        match = df_all[df_all['Ticker'] == sym]
+        if not match.empty:
+            return match.iloc[0]['Name']
+    return info.get('shortName', sym)
+
 # ==========================================
 # ✅ FIX B: 安全取得即時股價 (相容新版 yfinance)
 # fast_info 是物件，不能用 .get()
@@ -574,7 +581,7 @@ def run_pit_backtest_local(sym, target_date, is_finance, industry_name):
         if scores['Msg']: status_msg += f" | {' '.join(scores['Msg'])}"
 
         return {
-            '代碼': sym, '名稱': info.get('shortName', sym), '進場日': target_dt.strftime('%Y-%m-%d'),
+            '代碼': sym, '名稱': get_stock_name(sym, info), '進場日': target_dt.strftime('%Y-%m-%d'),
             '進場價': round(ep, 1), '現價': round(cp, 1), '當時總分': int(scores['Total']), '當時狀態': status_msg,
             '當時合理價(Base)': round(base_intrin, 1), '當時PE': round(cur_pe, 1),
             '3個月': f"{ret(90)*100:.1f}%" if ret(90) is not None else "-",
@@ -726,7 +733,7 @@ with tab1:
                         _rev_ttm = rev_ttm if rev_ttm > 0 else (op_rev * 4)
                         raw_data.append({
                             '股票代碼': sym,
-                            '名稱': info.get('shortName', sym),
+                            '名稱': get_stock_name(sym, info),
                             '現價': float(p),
                             '營收成長率': f"{real_g*100:.1f}%",
                             '預估EPS': round(eps * (1 + min(real_g, 0.1)), 2),
@@ -822,7 +829,10 @@ with tab2:
                         # ✅ TTM YoY: 近四季累積營收 vs 去年同期四季累積
                         rev_ttm  = sum(safe_val(p_is, d, ['Revenue']) for d in p_is.index[:4])
                         rev_prev = sum(safe_val(p_is, d, ['Revenue']) for d in p_is.index[4:8]) if len(p_is) >= 8 else 0
-                        real_g = (rev_ttm - rev_prev) / rev_prev if rev_prev > 0 else 0
+                        real_g_q = (rev_ttm - rev_prev) / rev_prev if rev_prev > 0 else 0
+                        # ✅ 月營收累計年增率覆蓋
+                        real_g_m = get_monthly_rev_growth(sym)
+                        real_g   = real_g_m if real_g_m is not None else real_g_q
                         # QoQ 動能: 最新單季 vs 去年同季
                         r_now = safe_val(p_is, p_is.index[0], ['Revenue'])
                         r_prev_qoq = safe_val(p_is, p_is.index[4], ['Revenue']) if len(p_is) >= 5 else 0
@@ -874,7 +884,7 @@ with tab2:
                         _ni_ttm = eps * shares
                         _rev_ttm = rev_ttm if rev_ttm > 0 else (op_rev * 4)
                         data = {
-                            '股票代碼': sym, '名稱': info.get('shortName', sym), '現價': float(p),
+                            '股票代碼': sym, '名稱': get_stock_name(sym, info), '現價': float(p),
                             '營收成長率': f"{real_g*100:.1f}%",
                             '預估EPS': round(eps * (1 + min(real_g, 0.1)), 2),
                             '營業利益率': f"{(safe_val(p_is, ld, ['OperatingIncome'])/op_rev)*100:.1f}%" if op_rev > 0 else "-",
@@ -1206,7 +1216,9 @@ with tab5:
                     eps5        = sum(safe_val(p_is5, d, ['EPS']) for d in p_is5.index[:4])
                     rev_ttm5    = sum(safe_val(p_is5, d, ['Revenue']) for d in p_is5.index[:4])
                     rev_prev5   = sum(safe_val(p_is5, d, ['Revenue']) for d in p_is5.index[4:8]) if len(p_is5) >= 8 else 0
-                    real_g5     = (rev_ttm5 - rev_prev5) / rev_prev5 if rev_prev5 > 0 else 0
+                    real_g_q5   = (rev_ttm5 - rev_prev5) / rev_prev5 if rev_prev5 > 0 else 0
+                    real_g_m5   = get_monthly_rev_growth(sym5)
+                    real_g5     = real_g_m5 if real_g_m5 is not None else real_g_q5
 
                     shares5 = float(info5.get('sharesOutstanding', 0) or 0)
                     if shares5 <= 0:
@@ -1262,7 +1274,7 @@ with tab5:
                     op_rev5 = safe_val(p_is5, ld5, ['Revenue'])
                     raw_t5.append({
                         '股票代碼' : sym5,
-                        '名稱'     : info5.get('shortName', sym5),
+                        '名稱'     : get_stock_name(sym5, info5),
                         '概念主題' : ' ｜ '.join(theme_map_t5.get(clean5, [])),
                         '現價'     : float(p5),
                         '營收成長率': f"{real_g5*100:.1f}%",
