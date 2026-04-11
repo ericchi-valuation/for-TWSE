@@ -20,7 +20,8 @@ warnings.simplefilter(action='ignore', category=FutureWarning)
 # ==========================================
 # ✅ My-TW-Coverage 質化資料讀取
 # ==========================================
-@st.cache_data(show_spinner=False)
+# ⚠️ 不加 @st.cache_data：Markdown 報告會在本地頻繁修改，
+#    讀取幾 KB 文字不到 1ms，不快取才能確保每次 F5 看到最新版本
 def get_qualitative_report(base_dir, ticker):
     """自動搜尋 My-TW-Coverage（含解壓縮後多層資料夾），讀取個股質化報告。"""
     clean_ticker = str(ticker).replace('.TW', '').replace('.TWO', '')
@@ -242,6 +243,33 @@ def get_single_quarter_cf(p_cf_df, dates, keys):
                 single_q = val
             total += single_q
     return total
+
+def get_single_quarter_is(p_is_df, date, keys):
+    """將台灣累計損益表數據精準剝離為單季值。
+    台灣損益表採年度累計制：Q3 報表 = Q1+Q2+Q3 累計。
+    需減去前一期（Q2 累計）才能得到真正的單季 Q3 值。
+    Q1（3月）報表本身即為單季值，直接回傳。
+    若相減結果為負（跨年邊界或資料缺漏），保守地回傳原值。
+    """
+    val = safe_val(p_is_df, date, keys)
+    if val == 0:
+        return 0.0
+    month = date.month if hasattr(date, 'month') else pd.to_datetime(date).month
+    if month == 3:  # Q1：本身即為單季，無需剝離
+        return val
+    # 找同年中、比 date 早的最近一期（即前一個累計期）
+    date_ts = pd.Timestamp(date)
+    same_year_prev = [
+        d for d in p_is_df.index
+        if hasattr(d, 'year') and d.year == date_ts.year and d < date_ts
+    ]
+    if not same_year_prev:
+        return val  # 找不到前期（可能是年報），保守回傳原值
+    prev_date = max(same_year_prev)  # 取最近的前期
+    prev_val = safe_val(p_is_df, prev_date, keys)
+    single_q = val - prev_val
+    # 若相減為負（資料異常），保守地回傳原值
+    return single_q if single_q >= 0 else val
 
 # ==========================================
 # ✅ FIX A: yf.download 最新價格統一解析器
@@ -540,9 +568,10 @@ def run_pit_backtest_local(sym, target_date, is_finance, industry_name):
         prev_rev = np.mean([safe_val(p_is, d, ['Revenue']) for d in valid_dates[4:8]]) * 4 if len(valid_dates) >= 8 else 0
         real_growth = (rev_ttm - prev_rev) / prev_rev if prev_rev > 0 else 0.05
         
-        r_now = safe_val(p_is, valid_dates[0], ['Revenue'])
-        r_prev = safe_val(p_is, valid_dates[4], ['Revenue']) if len(valid_dates) >= 5 else 0
-        qoq_growth = (r_now - r_prev) / r_prev if r_prev > 0 else 0
+        # ✅ QoQ 動能: 精確單季營收（去累計） vs 去年同季精確單季
+        r_now_sq_bt   = get_single_quarter_is(p_is, valid_dates[0], ['Revenue'])
+        r_prev_sq_bt  = get_single_quarter_is(p_is, valid_dates[4], ['Revenue']) if len(valid_dates) >= 5 else 0
+        qoq_growth = (r_now_sq_bt - r_prev_sq_bt) / r_prev_sq_bt if r_prev_sq_bt > 0 else 0
         op_margins = [safe_val(p_is, d, ['OperatingIncome']) / safe_val(p_is, d, ['Revenue']) for d in valid_dates[:4] if safe_val(p_is, d, ['Revenue']) > 0]
 
         try: info = stock.info
@@ -681,10 +710,10 @@ with tab1:
                         # ✅ 月營收累計年增率覆蓋（比季報更準確，且能偵測 KY 股混用年/季資料的失真）
                         real_g_m = get_monthly_rev_growth(sym)
                         real_g   = real_g_m if real_g_m is not None else real_g_q
-                        # QoQ 動能: 最新單季 vs 去年同季
-                        r_now = safe_val(p_is, p_is.index[0], ['Revenue'])
-                        r_prev_qoq = safe_val(p_is, p_is.index[4], ['Revenue']) if len(p_is) >= 5 else 0
-                        qoq_g = (r_now - r_prev_qoq) / r_prev_qoq if r_prev_qoq > 0 else 0
+                        # ✅ QoQ 動能: 精確單季營收（去累計） vs 去年同季精確單季
+                        r_now_sq     = get_single_quarter_is(p_is, p_is.index[0], ['Revenue'])
+                        r_prev_sq    = get_single_quarter_is(p_is, p_is.index[4], ['Revenue']) if len(p_is) >= 5 else 0
+                        qoq_g = (r_now_sq - r_prev_sq) / r_prev_sq if r_prev_sq > 0 else 0
                         
                         # ✅ shares: 優先 yfinance，失敗時用本地 BS 資料（避免預設 1 導致 DCF 飆高）
                         shares = float(info.get('sharesOutstanding', 0) or 0)
@@ -833,10 +862,10 @@ with tab2:
                         # ✅ 月營收累計年增率覆蓋
                         real_g_m = get_monthly_rev_growth(sym)
                         real_g   = real_g_m if real_g_m is not None else real_g_q
-                        # QoQ 動能: 最新單季 vs 去年同季
-                        r_now = safe_val(p_is, p_is.index[0], ['Revenue'])
-                        r_prev_qoq = safe_val(p_is, p_is.index[4], ['Revenue']) if len(p_is) >= 5 else 0
-                        qoq_g = (r_now - r_prev_qoq) / r_prev_qoq if r_prev_qoq > 0 else 0
+                        # ✅ QoQ 動能: 精確單季營收（去累計） vs 去年同季精確單季
+                        r_now_sq     = get_single_quarter_is(p_is, p_is.index[0], ['Revenue'])
+                        r_prev_sq    = get_single_quarter_is(p_is, p_is.index[4], ['Revenue']) if len(p_is) >= 5 else 0
+                        qoq_g = (r_now_sq - r_prev_sq) / r_prev_sq if r_prev_sq > 0 else 0
                         
                         # ✅ shares: 優先 yfinance，失敗時用本地 BS 資料（避免預設 1 導致 DCF 飆高）
                         shares = float(info.get('sharesOutstanding', 0) or 0)
@@ -1259,9 +1288,10 @@ with tab5:
                     ]
                     de5 = debt5 / ebitda5 if ebitda5 > 0 else 0
                     
-                    r_now5 = safe_val(p_is5, p_is5.index[0], ['Revenue'])
-                    r_prev_qoq5 = safe_val(p_is5, p_is5.index[4], ['Revenue']) if len(p_is5) >= 5 else 0
-                    qoq_g5 = (r_now5 - r_prev_qoq5) / r_prev_qoq5 if r_prev_qoq5 > 0 else 0
+                    # ✅ QoQ 動能: 精確單季營收（去累計） vs 去年同季精確單季
+                    r_now_sq5    = get_single_quarter_is(p_is5, p_is5.index[0], ['Revenue'])
+                    r_prev_sq5   = get_single_quarter_is(p_is5, p_is5.index[4], ['Revenue']) if len(p_is5) >= 5 else 0
+                    qoq_g5 = (r_now_sq5 - r_prev_sq5) / r_prev_sq5 if r_prev_sq5 > 0 else 0
                     
                     scores5 = calculate_scores(
                         info5, real_g5, qoq_g5, upside5, c_pe5, c_ev5, avg_pe5, med_pe5,
