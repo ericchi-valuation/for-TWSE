@@ -5,6 +5,8 @@ import numpy as np
 import os
 import io
 import glob
+import json
+import re
 
 from datetime import datetime, timedelta
 import warnings
@@ -18,7 +20,8 @@ warnings.simplefilter(action='ignore', category=FutureWarning)
 # ==========================================
 # ✅ My-TW-Coverage 質化資料讀取
 # ==========================================
-@st.cache_data(show_spinner=False)
+# ⚠️ 不加 @st.cache_data：Markdown 報告會在本地頻繁修改，
+#    讀取幾 KB 文字不到 1ms，不快取才能確保每次 F5 看到最新版本
 def get_qualitative_report(base_dir, ticker):
     """自動搜尋 My-TW-Coverage（含解壓縮後多層資料夾），讀取個股質化報告。"""
     clean_ticker = str(ticker).replace('.TW', '').replace('.TWO', '')
@@ -50,6 +53,91 @@ def get_qualitative_report(base_dir, ticker):
             return content.strip()
     except Exception as e:
         return f"讀取質化資料時發生錯誤: {e}"
+@st.cache_data(show_spinner=False)
+def load_all_themes(base_dir):
+    """解析 My-TW-Coverage/themes/*.md，建立 主題名稱 → [股票代碼] 映射表。"""
+    app_dir = os.path.dirname(os.path.abspath(__file__))
+    files = glob.glob(os.path.join(app_dir, base_dir, "**", "themes", "*.md"), recursive=True)
+    results = {}
+    for f in files:
+        name = os.path.basename(f).replace(".md", "")
+        if name == "README":
+            continue
+        try:
+            content = open(f, 'r', encoding='utf-8').read()
+            codes = re.findall(r'\*\*(\d{4,5})\s', content)
+            if codes:
+                results[name] = codes
+        except:
+            pass
+    return results
+
+@st.cache_data(show_spinner=False)
+def load_graph_data(base_dir):
+    """載入 My-TW-Coverage/network/graph_data.json。"""
+    app_dir = os.path.dirname(os.path.abspath(__file__))
+    files = glob.glob(os.path.join(app_dir, base_dir, "**", "graph_data.json"), recursive=True)
+    if not files:
+        return None
+    with open(files[0], 'r', encoding='utf-8') as f:
+        return json.load(f)
+
+def build_stock_network_html(graph_data, wikilinks):
+    """依公司報告中的 [[wikilink]]，過濾 graph_data.json，生成 D3.js 互動式網路圖 HTML。"""
+    if not graph_data or not wikilinks:
+        return None
+    found_ids = {w for w in wikilinks if any(n['id'] == w for n in graph_data['nodes'])}
+    if not found_ids:
+        return None
+    connected_ids = set(found_ids)
+    for lnk in graph_data['links']:
+        if lnk['source'] in found_ids or lnk['target'] in found_ids:
+            connected_ids.add(lnk['source'])
+            connected_ids.add(lnk['target'])
+    nodes_f = [n for n in graph_data['nodes'] if n['id'] in connected_ids]
+    links_f = [lnk for lnk in graph_data['links'] if lnk['source'] in connected_ids and lnk['target'] in connected_ids]
+    nodes_j = json.dumps(nodes_f, ensure_ascii=False)
+    links_j = json.dumps(links_f, ensure_ascii=False)
+    return f"""<!DOCTYPE html><html><head>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+body{{margin:0;background:#0f1117;font-family:sans-serif;overflow:hidden;}}
+.link{{stroke:rgba(255,255,255,0.18);stroke-width:1px;}}
+.node text{{font-size:11px;fill:#eee;text-anchor:middle;pointer-events:none;text-shadow:0 1px 3px rgba(0,0,0,0.95);}}
+.tooltip{{position:fixed;padding:8px 12px;background:rgba(20,20,30,0.92);color:#fff;border-radius:6px;font-size:12px;pointer-events:none;border:1px solid #555;}}
+</style></head><body>
+<div id="tip" class="tooltip" style="opacity:0;top:0;left:0;"></div>
+<script>
+const nodes={nodes_j};
+const links={links_j};
+const w=window.innerWidth,h=window.innerHeight;
+const svg=d3.select('body').append('svg').attr('width',w).attr('height',h);
+const sim=d3.forceSimulation(nodes)
+  .force('link',d3.forceLink(links).id(d=>d.id).distance(d=>Math.max(55,110-((d.weight||1)*0.4))))
+  .force('charge',d3.forceManyBody().strength(-220))
+  .force('center',d3.forceCenter(w/2,h/2))
+  .force('collide',d3.forceCollide(32));
+const link=svg.append('g').selectAll('line').data(links).join('line').attr('class','link')
+  .attr('stroke-width',d=>Math.max(1,Math.sqrt(d.weight||1)*0.35));
+const node=svg.append('g').selectAll('g').data(nodes).join('g').attr('class','node')
+  .call(d3.drag()
+    .on('start',(e,d)=>{{if(!e.active)sim.alphaTarget(0.3).restart();d.fx=d.x;d.fy=d.y;}})
+    .on('drag',(e,d)=>{{d.fx=e.x;d.fy=e.y;}})
+    .on('end',(e,d)=>{{if(!e.active)sim.alphaTarget(0);d.fx=null;d.fy=null;}}));
+node.append('circle').attr('r',d=>Math.max(9,Math.min(26,Math.sqrt(d.count||10)*1.9)))
+  .attr('fill',d=>d.color||'#888').attr('opacity',0.88);
+node.append('text').attr('dy','0.32em')
+  .attr('y',d=>Math.max(9,Math.min(26,Math.sqrt(d.count||10)*1.9))+13).text(d=>d.id);
+const tip=document.getElementById('tip');
+const catMap={{'taiwan_company':'台灣企業','international_company':'國際企業','technology':'技術','application':'應用','material':'材料'}};
+node.on('mouseover',(e,d)=>{{tip.style.opacity=1;tip.innerHTML=`<b>${{d.id}}</b><br>類別: ${{catMap[d.category]||d.category}}<br>關聯度: ${{d.count||'-'}}`;tip.style.left=(e.clientX+14)+'px';tip.style.top=(e.clientY-8)+'px';}})
+  .on('mousemove',(e)=>{{tip.style.left=(e.clientX+14)+'px';tip.style.top=(e.clientY-8)+'px';}})
+  .on('mouseout',()=>{{tip.style.opacity=0;}});
+sim.on('tick',()=>{{
+  link.attr('x1',d=>d.source.x).attr('y1',d=>d.source.y).attr('x2',d=>d.target.x).attr('y2',d=>d.target.y);
+  node.attr('transform',d=>`translate(${{d.x}},${{d.y}})`);
+}});
+</script></body></html>"""
 
 # ==========================================
 # 1. 讀取本地三大金庫 (Parquet 極速版)
@@ -69,6 +157,43 @@ def load_local_databases():
     return df_list, df_is, df_bs, df_cf
 
 df_all, DB_IS, DB_BS, DB_CF = load_local_databases()
+
+@st.cache_data(show_spinner=False)
+def load_monthly_rev_db():
+    """載入月營收 Parquet，回傳以 stock_id 為 key 的 DataFrame。"""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'tw_monthly_rev.parquet')
+    if not os.path.exists(path):
+        return pd.DataFrame()
+    df = pd.read_parquet(path)
+    df['date'] = pd.to_datetime(df['date'])
+    return df
+
+DB_MR = load_monthly_rev_db()
+
+def get_monthly_rev_growth(ticker):
+    """從月營收 DB 計算最新累積年增率（YTD YoY）。
+    優先取最近 2 個月的 YTD 做比較（避免單月波動太大）。
+    回傳 float 或 None（無資料時）。"""
+    if DB_MR.empty:
+        return None
+    clean = str(ticker).replace('.TW', '').replace('.TWO', '')
+    df = DB_MR[DB_MR['stock_id'].astype(str) == clean].copy()
+    if df.empty:
+        return None
+    df = df.sort_values('date')
+    ly = int(df.iloc[-1]['date'].year)
+    lm = int(df.iloc[-1]['date'].month)
+    # 年初資料不穩定保護：至少需要 3 個月才計算，避免單月雜訊太大
+    months_this_yr = int((df['date'].dt.year == ly).sum())
+    if months_this_yr < 3:
+        return None
+    # YTD current year (1月 ~ 最新月)
+    rev_ytd = float(df[(df['date'].dt.year == ly) & (df['date'].dt.month <= lm)]['revenue'].sum())
+    # YTD same period last year
+    rev_ytd_py = float(df[(df['date'].dt.year == (ly - 1)) & (df['date'].dt.month <= lm)]['revenue'].sum())
+    if rev_ytd_py > 0 and rev_ytd > 0:
+        return (rev_ytd - rev_ytd_py) / rev_ytd_py
+    return None
 
 IND_PE_DEFAULT = {
     "半導體業": 25.0, "金融業": 14.0, "航運業": 10.0,
@@ -97,6 +222,54 @@ def safe_val(df, idx_date, keys, default=0):
 def get_historical_shares(p_bs, date, fallback_shares):
     cap = safe_val(p_bs, date, ['OrdinaryShare', 'CapitalStock', 'OrdinaryShare_per', 'CapitalStock_per'])
     return cap / 10.0 if cap > 0 else fallback_shares
+
+def get_single_quarter_cf(p_cf_df, dates, keys):
+    """將累計現金流量與折舊轉為單季值後加總(TTM)，避免跨年或例外值干擾。"""
+    total = 0.0
+    for i, d in enumerate(dates[:4]):
+        month = d.month if hasattr(d, 'month') else pd.to_datetime(d).month
+        val = safe_val(p_cf_df, d, keys)
+        if month == 3:
+            total += val
+        else:
+            prev_date = dates[i + 1] if (i + 1) < len(dates) else None
+            # 確保 prev_date 是同一年，否則減去錯誤基準會導致負值
+            prev_year = prev_date.year if (prev_date is not None and hasattr(prev_date, 'year')) else None
+            curr_year = d.year if hasattr(d, 'year') else pd.to_datetime(d).year
+            prev_val = safe_val(p_cf_df, prev_date, keys) if prev_year == curr_year else 0
+            single_q = val - prev_val
+            # 跨年邊界保護：若相減後為負，代表跨年、缺漏或異常，根據建議改用當季原值
+            if single_q < 0:
+                single_q = val
+            total += single_q
+    return total
+
+def get_single_quarter_is(p_is_df, date, keys):
+    """將台灣累計損益表數據精準剝離為單季值。
+    台灣損益表採年度累計制：Q3 報表 = Q1+Q2+Q3 累計。
+    需減去前一期（Q2 累計）才能得到真正的單季 Q3 值。
+    Q1（3月）報表本身即為單季值，直接回傳。
+    若相減結果為負（跨年邊界或資料缺漏），保守地回傳原值。
+    """
+    val = safe_val(p_is_df, date, keys)
+    if val == 0:
+        return 0.0
+    month = date.month if hasattr(date, 'month') else pd.to_datetime(date).month
+    if month == 3:  # Q1：本身即為單季，無需剝離
+        return val
+    # 找同年中、比 date 早的最近一期（即前一個累計期）
+    date_ts = pd.Timestamp(date)
+    same_year_prev = [
+        d for d in p_is_df.index
+        if hasattr(d, 'year') and d.year == date_ts.year and d < date_ts
+    ]
+    if not same_year_prev:
+        return val  # 找不到前期（可能是年報），保守回傳原值
+    prev_date = max(same_year_prev)  # 取最近的前期
+    prev_val = safe_val(p_is_df, prev_date, keys)
+    single_q = val - prev_val
+    # 若相減為負（資料異常），保守地回傳原值
+    return single_q if single_q >= 0 else val
 
 # ==========================================
 # ✅ FIX A: yf.download 最新價格統一解析器
@@ -135,6 +308,13 @@ def parse_bulk_close(bulk_data, tickers_list):
     except Exception:
         return pd.Series(dtype=float)
 
+
+def get_stock_name(sym, info):
+    if not df_all.empty:
+        match = df_all[df_all['Ticker'] == sym]
+        if not match.empty:
+            return match.iloc[0]['Name']
+    return info.get('shortName', sym)
 
 # ==========================================
 # ✅ FIX B: 安全取得即時股價 (相容新版 yfinance)
@@ -261,22 +441,7 @@ def get_3_stage_valuation_local(p_is, p_bs, p_cf, shares, is_fin, real_g, beta, 
         # 非金融業：三階段 DCF
         # ==========================================
         # ✅ FCF TTM 精確計算（去累計化）
-        # 台灣財報現金流量表是「年度累計值」，不能直接加總四季！
-        # 正確做法：取近4季各自的「單季獨立值」後再加總
-        def get_single_quarter_cf(p_cf_df, dates, keys):
-            """將累計現金流量轉為單季值後加總，避免 Q4 值被重複計算 2.5 倍。"""
-            total = 0.0
-            for i, d in enumerate(dates[:4]):
-                month = d.month if hasattr(d, 'month') else pd.to_datetime(d).month
-                val = safe_val(p_cf_df, d, keys)
-                if month == 12:  # Q4：全年累計值，直接使用
-                    total += val
-                else:
-                    # 非 Q4：減去上一季的累計值，得到本季單季值
-                    prev_date = dates[i + 1] if (i + 1) < len(dates) else None
-                    prev_val = safe_val(p_cf_df, prev_date, keys) if prev_date is not None else 0
-                    total += (val - prev_val)
-            return total
+
 
         all_dates = p_is.index.tolist()
         ocf_ttm = get_single_quarter_cf(p_cf, all_dates, ['CashFlowsFromOperatingActivities', 'NetCashInflowFromOperatingActivities'])
@@ -330,8 +495,16 @@ def calculate_scores(info, real_g, qoq_g, upside, cur_pe, cur_ev, avg_pe, med_pe
     elif len(op_m) >= 2 and op_m[0] < op_m[1]: s['Q'] -= 1; s['Msg'].append("營益率降")
     
     dy = float(info.get('dividendYield', 0) or 0)
-    if dy > 0.06: s['Q'] += 2
-    elif dy > 0.03: s['Q'] += 1
+    cur_pe_safe = cur_pe if cur_pe and cur_pe > 0 else 0
+    # 配息率防護：若配息率 > 100%（EPS 撐不住配息）或 EPS < 0，視為財務警訊而非加分
+    payout = dy * cur_pe_safe if cur_pe_safe > 0 else 999
+    if payout > 1.2 or cur_pe_safe == 0:
+        if dy > 0:
+            s['Msg'].append("配息率異常")
+    elif dy > 0.06:
+        s['Q'] += 2
+    elif dy > 0.03:
+        s['Q'] += 1
 
     if is_cyclical:
         if min_pb > 0 and 0 < cur_pb < (min_pb * 1.1): s['V'] += 4
@@ -395,9 +568,10 @@ def run_pit_backtest_local(sym, target_date, is_finance, industry_name):
         prev_rev = np.mean([safe_val(p_is, d, ['Revenue']) for d in valid_dates[4:8]]) * 4 if len(valid_dates) >= 8 else 0
         real_growth = (rev_ttm - prev_rev) / prev_rev if prev_rev > 0 else 0.05
         
-        r_now = safe_val(p_is, valid_dates[0], ['Revenue'])
-        r_prev = safe_val(p_is, valid_dates[1], ['Revenue']) if len(valid_dates) > 1 else 0
-        qoq_growth = (r_now - r_prev) / r_prev if r_prev > 0 else 0
+        # ✅ QoQ 動能: 精確單季營收（去累計） vs 去年同季精確單季
+        r_now_sq_bt   = get_single_quarter_is(p_is, valid_dates[0], ['Revenue'])
+        r_prev_sq_bt  = get_single_quarter_is(p_is, valid_dates[4], ['Revenue']) if len(valid_dates) >= 5 else 0
+        qoq_growth = (r_now_sq_bt - r_prev_sq_bt) / r_prev_sq_bt if r_prev_sq_bt > 0 else 0
         op_margins = [safe_val(p_is, d, ['OperatingIncome']) / safe_val(p_is, d, ['Revenue']) for d in valid_dates[:4] if safe_val(p_is, d, ['Revenue']) > 0]
 
         try: info = stock.info
@@ -409,7 +583,9 @@ def run_pit_backtest_local(sym, target_date, is_finance, industry_name):
         equity = safe_val(p_bs, ld, ['EquityAttributableToOwnersOfParent'], 1)
         debt = safe_val(p_bs, ld, ['CurrentLiabilities']) + safe_val(p_bs, ld, ['NoncurrentLiabilities'])
         cash = safe_val(p_bs, ld, ['CashAndCashEquivalents'])
-        ttm_ebitda = np.mean([(safe_val(p_is, d, ['OperatingIncome']) + safe_val(p_cf, d, ['Depreciation'])) for d in valid_dates[:4]]) * 4
+        op_ttm = sum(safe_val(p_is, d, ['OperatingIncome']) for d in valid_dates[:4])
+        dep_ttm = get_single_quarter_cf(p_cf, valid_dates, ['Depreciation'])
+        ttm_ebitda = op_ttm + abs(dep_ttm)
         
         cur_pb = ep / (equity / hist_shares) if equity > 0 else 0
         cur_pe = ep / eps_ttm if eps_ttm > 0 else 0
@@ -434,7 +610,7 @@ def run_pit_backtest_local(sym, target_date, is_finance, industry_name):
         if scores['Msg']: status_msg += f" | {' '.join(scores['Msg'])}"
 
         return {
-            '代碼': sym, '名稱': info.get('shortName', sym), '進場日': target_dt.strftime('%Y-%m-%d'),
+            '代碼': sym, '名稱': get_stock_name(sym, info), '進場日': target_dt.strftime('%Y-%m-%d'),
             '進場價': round(ep, 1), '現價': round(cp, 1), '當時總分': int(scores['Total']), '當時狀態': status_msg,
             '當時合理價(Base)': round(base_intrin, 1), '當時PE': round(cur_pe, 1),
             '3個月': f"{ret(90)*100:.1f}%" if ret(90) is not None else "-",
@@ -454,7 +630,7 @@ def run_pit_backtest_local(sym, target_date, is_finance, industry_name):
 # UI 介面
 # ==========================================
 st.title("V7.4 Eric Chi 估值模型 (真實市值極速版)")
-tab1, tab2, tab3, tab4 = st.tabs(["全產業掃描", "單股深度查詢", "真·時光機回測", "⏳ 時點回測×全產業掃描"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["全產業掃描", "單股深度查詢", "真·時光機回測", "⏳ 時點回測×全產業掃描", "🔥 主題概念掃描"])
 cols_display = ['股票代碼', '名稱', '現價', '營收成長率', '預估EPS', '營業利益率', '淨利率',
                 'P/E (TTM)', 'P/B (Lag)', 'P/S (Lag)', 'EV/EBITDA', 'DCF/DDM合理價區間',
                 '歷史P/E區間', '歷史P/B區間', '歷史P/S區間', '狀態', 'vs產業PE', '選股邏輯']
@@ -530,11 +706,14 @@ with tab1:
                         # ✅ TTM YoY: 近四季累積營收 vs 去年同期四季累積
                         rev_ttm  = sum(safe_val(p_is, d, ['Revenue']) for d in p_is.index[:4])
                         rev_prev = sum(safe_val(p_is, d, ['Revenue']) for d in p_is.index[4:8]) if len(p_is) >= 8 else 0
-                        real_g = (rev_ttm - rev_prev) / rev_prev if rev_prev > 0 else 0
-                        # QoQ 動能: 最新單季 vs 去年同季
-                        r_now = safe_val(p_is, p_is.index[0], ['Revenue'])
-                        r_prev_qoq = safe_val(p_is, p_is.index[4], ['Revenue']) if len(p_is) >= 5 else 0
-                        qoq_g = (r_now - r_prev_qoq) / r_prev_qoq if r_prev_qoq > 0 else 0
+                        real_g_q = (rev_ttm - rev_prev) / rev_prev if rev_prev > 0 else 0
+                        # ✅ 月營收累計年增率覆蓋（比季報更準確，且能偵測 KY 股混用年/季資料的失真）
+                        real_g_m = get_monthly_rev_growth(sym)
+                        real_g   = real_g_m if real_g_m is not None else real_g_q
+                        # ✅ QoQ 動能: 精確單季營收（去累計） vs 去年同季精確單季
+                        r_now_sq     = get_single_quarter_is(p_is, p_is.index[0], ['Revenue'])
+                        r_prev_sq    = get_single_quarter_is(p_is, p_is.index[4], ['Revenue']) if len(p_is) >= 5 else 0
+                        qoq_g = (r_now_sq - r_prev_sq) / r_prev_sq if r_prev_sq > 0 else 0
                         
                         # ✅ shares: 優先 yfinance，失敗時用本地 BS 資料（避免預設 1 導致 DCF 飆高）
                         shares = float(info.get('sharesOutstanding', 0) or 0)
@@ -555,11 +734,10 @@ with tab1:
 
                         debt = safe_val(p_bs, ld, ['CurrentLiabilities']) + safe_val(p_bs, ld, ['NoncurrentLiabilities'])
                         cash = safe_val(p_bs, ld, ['CashAndCashEquivalents'])
-                        # ✅ EV/EBITDA: 用 TTM + abs(Depreciation) 避免負値抗消
-                        ebitda_ttm = sum(
-                            safe_val(p_is, d, ['OperatingIncome']) + abs(safe_val(p_cf, d, ['Depreciation']))
-                            for d in p_is.index[:4]
-                        )
+                        # ✅ EV/EBITDA: 用 TTM + 準確去累積折舊 避免負値抗消與累積疊加
+                        op_ttm = sum(safe_val(p_is, d, ['OperatingIncome']) for d in p_is.index[:4])
+                        dep_ttm = get_single_quarter_cf(p_cf, p_is.index, ['Depreciation'])
+                        ebitda_ttm = op_ttm + abs(dep_ttm)
                         c_ev = ((p * shares) + debt - cash) / ebitda_ttm if ebitda_ttm > 0 else 0
                         
                         is_fin = any(x in ind for x in ["金融", "保險"])
@@ -584,7 +762,7 @@ with tab1:
                         _rev_ttm = rev_ttm if rev_ttm > 0 else (op_rev * 4)
                         raw_data.append({
                             '股票代碼': sym,
-                            '名稱': info.get('shortName', sym),
+                            '名稱': get_stock_name(sym, info),
                             '現價': float(p),
                             '營收成長率': f"{real_g*100:.1f}%",
                             '預估EPS': round(eps * (1 + min(real_g, 0.1)), 2),
@@ -680,11 +858,14 @@ with tab2:
                         # ✅ TTM YoY: 近四季累積營收 vs 去年同期四季累積
                         rev_ttm  = sum(safe_val(p_is, d, ['Revenue']) for d in p_is.index[:4])
                         rev_prev = sum(safe_val(p_is, d, ['Revenue']) for d in p_is.index[4:8]) if len(p_is) >= 8 else 0
-                        real_g = (rev_ttm - rev_prev) / rev_prev if rev_prev > 0 else 0
-                        # QoQ 動能: 最新單季 vs 去年同季
-                        r_now = safe_val(p_is, p_is.index[0], ['Revenue'])
-                        r_prev_qoq = safe_val(p_is, p_is.index[4], ['Revenue']) if len(p_is) >= 5 else 0
-                        qoq_g = (r_now - r_prev_qoq) / r_prev_qoq if r_prev_qoq > 0 else 0
+                        real_g_q = (rev_ttm - rev_prev) / rev_prev if rev_prev > 0 else 0
+                        # ✅ 月營收累計年增率覆蓋
+                        real_g_m = get_monthly_rev_growth(sym)
+                        real_g   = real_g_m if real_g_m is not None else real_g_q
+                        # ✅ QoQ 動能: 精確單季營收（去累計） vs 去年同季精確單季
+                        r_now_sq     = get_single_quarter_is(p_is, p_is.index[0], ['Revenue'])
+                        r_prev_sq    = get_single_quarter_is(p_is, p_is.index[4], ['Revenue']) if len(p_is) >= 5 else 0
+                        qoq_g = (r_now_sq - r_prev_sq) / r_prev_sq if r_prev_sq > 0 else 0
                         
                         # ✅ shares: 優先 yfinance，失敗時用本地 BS 資料（避免預設 1 導致 DCF 飆高）
                         shares = float(info.get('sharesOutstanding', 0) or 0)
@@ -703,11 +884,10 @@ with tab2:
 
                         debt = safe_val(p_bs, ld, ['CurrentLiabilities']) + safe_val(p_bs, ld, ['NoncurrentLiabilities'])
                         cash = safe_val(p_bs, ld, ['CashAndCashEquivalents'])
-                        # ✅ EV/EBITDA: 用 TTM + abs(Depreciation) 避免負値抗消
-                        ebitda_ttm = sum(
-                            safe_val(p_is, d, ['OperatingIncome']) + abs(safe_val(p_cf, d, ['Depreciation']))
-                            for d in p_is.index[:4]
-                        )
+                        # ✅ EV/EBITDA: 用 TTM + 準確去累積折舊 避免負値抗消與累積疊加
+                        op_ttm = sum(safe_val(p_is, d, ['OperatingIncome']) for d in p_is.index[:4])
+                        dep_ttm = get_single_quarter_cf(p_cf, p_is.index, ['Depreciation'])
+                        ebitda_ttm = op_ttm + abs(dep_ttm)
                         c_ev = ((p * shares) + debt - cash) / ebitda_ttm if ebitda_ttm > 0 else 0
                         
                         vals, g, wacc, roic = get_3_stage_valuation_local(p_is, p_bs, p_cf, shares, is_fin, real_g, info.get('beta', 1.0), float(info.get('dividendRate', 0) or 0))
@@ -733,7 +913,7 @@ with tab2:
                         _ni_ttm = eps * shares
                         _rev_ttm = rev_ttm if rev_ttm > 0 else (op_rev * 4)
                         data = {
-                            '股票代碼': sym, '名稱': info.get('shortName', sym), '現價': float(p),
+                            '股票代碼': sym, '名稱': get_stock_name(sym, info), '現價': float(p),
                             '營收成長率': f"{real_g*100:.1f}%",
                             '預估EPS': round(eps * (1 + min(real_g, 0.1)), 2),
                             '營業利益率': f"{(safe_val(p_is, ld, ['OperatingIncome'])/op_rev)*100:.1f}%" if op_rev > 0 else "-",
@@ -759,7 +939,7 @@ with tab2:
                                 use_container_width=True
                             )
                         
-                        # === 新增：讀取 My-TW-Coverage 的質化資料 ===
+                        # === My-TW-Coverage 質化資料 ===
                         st.divider()
                         st.subheader("📖 企業基本面與供應鏈 (來源: My-TW-Coverage)")
                         md_content = get_qualitative_report("My-TW-Coverage", sym)
@@ -767,6 +947,30 @@ with tab2:
                             st.markdown(md_content)
                         else:
                             st.info("尚無此標的的質化分析資料。")
+
+                        # === 主題標籤 ===
+                        all_themes_map = load_all_themes("My-TW-Coverage")
+                        clean_code = str(sym).replace('.TW', '').replace('.TWO', '')
+                        stock_in_themes = {t: codes for t, codes in all_themes_map.items() if clean_code in codes}
+                        if stock_in_themes:
+                            st.divider()
+                            st.subheader("🏷️ 概念主題標籤")
+                            theme_cols = st.columns(min(len(stock_in_themes), 5))
+                            for ti, (tname, tcodes) in enumerate(stock_in_themes.items()):
+                                theme_cols[ti % 5].success(f"**{tname}**\n\n{len(tcodes)} 檔概念股")
+
+                        # === 供應鏈網路圖 ===
+                        if md_content:
+                            # [[CompanyName|DisplayText]] 格式支援：只取 | 前的純名稱
+                            raw_links = re.findall(r'\[\[([^\]]+)\]\]', md_content)
+                            wikilinks = list({w.split('|')[0].strip() for w in raw_links})
+                            graph_data_raw = load_graph_data("My-TW-Coverage")
+                            net_html = build_stock_network_html(graph_data_raw, wikilinks)
+                            if net_html:
+                                st.divider()
+                                st.subheader("🕸️ 供應鏈關係網路圖")
+                                st.caption("節點大小代表關聯度，可拖曳互動。🔴 台灣企業 ｜ 🔵 國際企業 ｜ 🟢 技術 ｜ 🟣 應用")
+                                st.components.v1.html(net_html, height=480, scrolling=False)
                 except Exception as e:
                     st.error(f"查詢報錯: {e}")
 
@@ -868,9 +1072,11 @@ with tab4:
                 status4.text(f"[{idx4+1}/{len(pit_selected_inds)}] 批量預取 [{ind4}] 市值排序...")
                 tickers4 = df_all[df_all["Industry"] == ind4]["Ticker"].tolist()
 
-                # 批次取最新收盤作為市值排序依據（用現在的市值粗篩領頭羊）
+                # 批次取當時收盤的市值排序依據（用完全不穿越時空的市值粗篩領頭羊）
                 try:
-                    bulk4 = yf.download(tickers4, period="5d", progress=False)
+                    pit_dt_start = (pit_dt - pd.Timedelta(days=10)).strftime('%Y-%m-%d')
+                    pit_dt_end = (pit_dt + pd.Timedelta(days=1)).strftime('%Y-%m-%d')
+                    bulk4 = yf.download(tickers4, start=pit_dt_start, end=pit_dt_end, progress=False)
                     latest4 = parse_bulk_close(bulk4, tickers4)
                 except Exception:
                     latest4 = pd.Series(dtype=float)
@@ -951,3 +1157,197 @@ with tab4:
                     type="primary",
                     key="tab4_dl"
                 )
+
+# ==========================================
+# Tab 5. 🔥 主題概念掃描
+# ==========================================
+with tab5:
+    st.info(
+        "🔥 **主題概念掃描**：選擇特定概念主題（如 CoWoS、AI_伺服器、電動車），"
+        "系統自動撈出相關概念股並執行完整 DCF/DDM 估值分析，快速找出**分數最高且最被低估**的領頭羊！"
+    )
+
+    all_themes_t5 = load_all_themes("My-TW-Coverage")
+
+    if not all_themes_t5:
+        st.warning("⚠️ 找不到主題資料庫。請確認 My-TW-Coverage 已正確上傳至 GitHub。")
+    else:
+        col_t5a, col_t5b = st.columns([3, 1])
+        with col_t5a:
+            theme_opts = sorted(all_themes_t5.keys())
+            default_t5 = [t for t in ["AI_伺服器", "CoWoS"] if t in theme_opts]
+            selected_themes_t5 = st.multiselect(
+                "🎯 選擇概念主題 (可多選):",
+                theme_opts,
+                default=default_t5 or theme_opts[:1],
+                key="t5_themes"
+            )
+        with col_t5b:
+            min_score_t5 = st.number_input("最低總分門檻", 0, 100, 45, 5, key="t5_minscore")
+
+        if selected_themes_t5:
+            # 預覽股票數
+            preview_codes = set()
+            theme_code_map = {}
+            for t in selected_themes_t5:
+                for c in all_themes_t5[t]:
+                    preview_codes.add(c)
+                    theme_code_map.setdefault(c, []).append(t)
+            st.caption(f"📊 共涵蓋 **{len(preview_codes)}** 檔概念股 ({' + '.join(f'{t}({len(all_themes_t5[t])})' for t in selected_themes_t5)})")
+
+        run_t5 = st.button("⚡ 執行主題估值掃描", type="primary", key="t5_run")
+
+        if run_t5 and selected_themes_t5:
+            # ---- 整合所有主題的股票 ----
+            all_codes_t5 = set()
+            theme_map_t5 = {}
+            for t in selected_themes_t5:
+                for code in all_themes_t5[t]:
+                    all_codes_t5.add(code)
+                    theme_map_t5.setdefault(code, []).append(t)
+
+            # 將代碼對應至 Ticker
+            tickers_t5 = []
+            for code in all_codes_t5:
+                match = df_all[df_all['Code'].astype(str) == str(code)]
+                tickers_t5.append(match.iloc[0]['Ticker'] if not match.empty else f"{code}.TW")
+
+            pb_t5 = st.progress(0)
+            status_t5 = st.empty()
+
+            # 批次股價下載
+            status_t5.text(f"📡 批量取得 {len(tickers_t5)} 檔概念股股價...")
+            try:
+                bulk_t5 = yf.download(tickers_t5, period="5d", progress=False)
+                latest_t5 = parse_bulk_close(bulk_t5, tickers_t5)
+            except:
+                latest_t5 = pd.Series(dtype=float)
+
+            raw_t5 = []
+            for i5, sym5 in enumerate(tickers_t5):
+                pb_t5.progress((i5 + 1) / len(tickers_t5))
+                try:
+                    p5 = float(latest_t5.get(sym5, 0) or 0)
+                    if pd.isna(p5) or p5 == 0:
+                        continue
+
+                    stock5 = yf.Ticker(sym5)
+                    try:
+                        info5 = stock5.info
+                    except:
+                        info5 = {}
+
+                    p_is5, p_bs5, p_cf5 = get_stock_financials(sym5)
+                    if p_is5.empty:
+                        continue
+                    ld5 = p_is5.index[0]
+
+                    eps5        = sum(safe_val(p_is5, d, ['EPS']) for d in p_is5.index[:4])
+                    rev_ttm5    = sum(safe_val(p_is5, d, ['Revenue']) for d in p_is5.index[:4])
+                    rev_prev5   = sum(safe_val(p_is5, d, ['Revenue']) for d in p_is5.index[4:8]) if len(p_is5) >= 8 else 0
+                    real_g_q5   = (rev_ttm5 - rev_prev5) / rev_prev5 if rev_prev5 > 0 else 0
+                    real_g_m5   = get_monthly_rev_growth(sym5)
+                    real_g5     = real_g_m5 if real_g_m5 is not None else real_g_q5
+
+                    shares5 = float(info5.get('sharesOutstanding', 0) or 0)
+                    if shares5 <= 0:
+                        shares5 = get_historical_shares(p_bs5, ld5, 0)
+                    if shares5 <= 0:
+                        continue
+
+                    ind_m5  = df_all[df_all['Ticker'] == sym5]
+                    ind5    = ind_m5.iloc[0]['Industry'] if not ind_m5.empty else "未知"
+                    is_fin5 = any(x in ind5 for x in ["金融", "保險"])
+                    med_pe5 = IND_PE_DEFAULT.get(ind5, 22.0)
+
+                    hist5 = stock5.history(period="10y")
+                    if hist5.index.tz:
+                        hist5.index = hist5.index.tz_localize(None)
+                    rng5, avg_pe5, min_pb5, avg_pb5 = get_historical_metrics_local(p_is5, p_bs5, p_cf5, hist5, shares5)
+
+                    c_pe5   = p5 / eps5 if eps5 > 0 else 0
+                    eq_val5 = safe_val(p_bs5, ld5, ['EquityAttributableToOwnersOfParent'])
+                    c_pb5   = p5 / (eq_val5 / shares5) if eq_val5 > 0 else 0
+                    debt5   = safe_val(p_bs5, ld5, ['CurrentLiabilities']) + safe_val(p_bs5, ld5, ['NoncurrentLiabilities'])
+                    cash5   = safe_val(p_bs5, ld5, ['CashAndCashEquivalents'])
+                    
+                    op_ttm5 = sum(safe_val(p_is5, d, ['OperatingIncome']) for d in p_is5.index[:4])
+                    dep_ttm5 = get_single_quarter_cf(p_cf5, p_is5.index, ['Depreciation'])
+                    ebitda5 = op_ttm5 + abs(dep_ttm5)
+                    
+                    c_ev5 = ((p5 * shares5) + debt5 - cash5) / ebitda5 if ebitda5 > 0 else 0
+
+                    vals5, g5, wacc5, roic5 = get_3_stage_valuation_local(
+                        p_is5, p_bs5, p_cf5, shares5, is_fin5, real_g5,
+                        info5.get('beta', 1.0), float(info5.get('dividendRate', 0) or 0)
+                    )
+                    upside5 = (vals5[0] - p5) / p5 if vals5[0] > 0 else -1
+                    op_margins5 = [
+                        safe_val(p_is5, d, ['OperatingIncome']) / safe_val(p_is5, d, ['Revenue'])
+                        for d in p_is5.index[:4] if safe_val(p_is5, d, ['Revenue']) > 0
+                    ]
+                    de5 = debt5 / ebitda5 if ebitda5 > 0 else 0
+                    
+                    # ✅ QoQ 動能: 精確單季營收（去累計） vs 去年同季精確單季
+                    r_now_sq5    = get_single_quarter_is(p_is5, p_is5.index[0], ['Revenue'])
+                    r_prev_sq5   = get_single_quarter_is(p_is5, p_is5.index[4], ['Revenue']) if len(p_is5) >= 5 else 0
+                    qoq_g5 = (r_now_sq5 - r_prev_sq5) / r_prev_sq5 if r_prev_sq5 > 0 else 0
+                    
+                    scores5 = calculate_scores(
+                        info5, real_g5, qoq_g5, upside5, c_pe5, c_ev5, avg_pe5, med_pe5,
+                        c_pb5, min_pb5, avg_pb5, wacc5, roic5, de5, op_margins5, ind5
+                    )
+                    if scores5['Total'] < min_score_t5:
+                        continue
+
+                    clean5  = str(sym5).replace('.TW', '').replace('.TWO', '')
+                    op_rev5 = safe_val(p_is5, ld5, ['Revenue'])
+                    raw_t5.append({
+                        '股票代碼' : sym5,
+                        '名稱'     : get_stock_name(sym5, info5),
+                        '概念主題' : ' ｜ '.join(theme_map_t5.get(clean5, [])),
+                        '現價'     : float(p5),
+                        '營收成長率': f"{real_g5*100:.1f}%",
+                        '預估EPS'  : round(eps5 * (1 + min(real_g5, 0.1)), 2),
+                        '營業利益率': f"{(safe_val(p_is5, ld5, ['OperatingIncome'])/op_rev5)*100:.1f}%" if op_rev5 > 0 else "-",
+                        'P/E(TTM)' : round(c_pe5, 1) if c_pe5 else "-",
+                        'P/B(Lag)' : round(c_pb5, 2),
+                        'EV/EBITDA': f"{c_ev5:.1f}" if c_ev5 > 0 else "-",
+                        'DCF/DDM合理價(Base)': round(vals5[0], 1),
+                        'DCF/DDM區間': f"{vals5[1]:.1f} ~ {vals5[2]:.1f}",
+                        '低估幅度' : f"{upside5*100:.1f}%" if upside5 > -1 else "-",
+                        '狀態'     : f"{scores5['Lifecycle']} | Q:{scores5['Q']} V:{scores5['V']} G:{scores5['G']}" + (f" | {' '.join(scores5['Msg'])}" if scores5['Msg'] else ""),
+                        '總分'     : int(scores5['Total']),
+                    })
+                except:
+                    pass
+
+            pb_t5.empty()
+            status_t5.empty()
+
+            if raw_t5:
+                df_t5 = pd.DataFrame(raw_t5).sort_values('總分', ascending=False)
+                m1, m2, m3, m4 = st.columns(4)
+                m1.metric("掃描股票數", f"{len(df_t5)} 檔")
+                m2.metric("首選 (≥70分)", f"{(df_t5['總分'] >= 70).sum()} 檔")
+                avg_up = pd.to_numeric(df_t5['低估幅度'].str.replace('%', ''), errors='coerce').mean()
+                m3.metric("平均低估幅度", f"{avg_up:.1f}%" if not pd.isna(avg_up) else "-")
+                m4.metric("最高總分", f"{df_t5['總分'].max()} 分")
+
+                st.subheader("📊 主題估值掃描排行")
+                st.dataframe(df_t5.reset_index(drop=True), use_container_width=True)
+
+                buf_t5 = io.BytesIO()
+                with pd.ExcelWriter(buf_t5, engine='xlsxwriter') as w5:
+                    df_t5.to_excel(w5, index=False, sheet_name='主題掃描')
+                st.download_button(
+                    "📥 下載 Excel（主題掃描結果）",
+                    data=buf_t5.getvalue(),
+                    file_name=f"Thematic_Scan_{'_'.join(selected_themes_t5[:2])}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    type="primary",
+                    key="t5_dl"
+                )
+            else:
+                st.warning(f"⚠️ 未找到總分 ≥ {min_score_t5} 的達標概念股，請調低門檻或更換主題。")
+
