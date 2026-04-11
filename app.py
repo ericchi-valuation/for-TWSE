@@ -271,6 +271,75 @@ def get_single_quarter_is(p_is_df, date, keys):
     # 若相減為負（資料異常），保守地回傳原值
     return single_q if single_q >= 0 else val
 
+def build_annual_financials_table(p_is, p_bs, shares):
+    """
+    從季報 Parquet 抽取近 3 個完整年度（12月 Q4）的財報摘要。
+    - IS: 營業收入、營業利益、EPS、營業利益率、淨利率
+    - BS: 現金、股東權益、流動/非流動負債、每股淨值
+    自動依規模選擇億元 / 百萬元 / 千元單位。
+    回傳 (is_df, bs_df, unit_label)；資料不足時回傳 (None, None, '')。
+    """
+    # --- 找近 3 個 12 月份日期（完整年度結算） ---
+    annual_is_dates = sorted(
+        [d for d in p_is.index if hasattr(d, 'month') and d.month == 12],
+        reverse=True
+    )[:3]
+    annual_bs_dates = sorted(
+        [d for d in p_bs.index if hasattr(d, 'month') and d.month == 12],
+        reverse=True
+    )[:3]
+
+    if not annual_is_dates:
+        return None, None, ''
+
+    # --- 自動選擇顯示單位（依最新年度營業收入規模） ---
+    sample_rev = safe_val(p_is, annual_is_dates[0], ['Revenue'])
+    if sample_rev > 50_000_000:     # > 約 500 億（大型股，如台積電）
+        divisor, unit = 100_000, "億元"
+    elif sample_rev > 500_000:      # > 約 5 億（中型股）
+        divisor, unit = 1_000, "百萬元"
+    else:
+        divisor, unit = 1, "千元"
+
+    # --- 損益表 IS ---
+    is_rows = []
+    for d in annual_is_dates:
+        rev    = safe_val(p_is, d, ['Revenue'])
+        op_inc = safe_val(p_is, d, ['OperatingIncome'])
+        net_inc= safe_val(p_is, d, ['NetIncome'])
+        eps    = safe_val(p_is, d, ['EPS'])
+        op_m   = f"{op_inc/rev*100:.1f}%" if rev > 0 else "-"
+        net_m  = f"{net_inc/rev*100:.1f}%" if (rev > 0 and net_inc != 0) else "-"
+        is_rows.append({
+            '年度': str(d.year),
+            f'營業收入 ({unit})': round(rev / divisor, 1),
+            f'營業利益 ({unit})': round(op_inc / divisor, 1),
+            'EPS (元)': round(eps, 2),
+            '營業利益率': op_m,
+            '淨利率': net_m,
+        })
+    is_df = pd.DataFrame(is_rows).set_index('年度') if is_rows else pd.DataFrame()
+
+    # --- 資產負債表 BS ---
+    bs_rows = []
+    for d in annual_bs_dates:
+        cash     = safe_val(p_bs, d, ['CashAndCashEquivalents'])
+        equity   = safe_val(p_bs, d, ['EquityAttributableToOwnersOfParent', 'TotalEquity'])
+        cur_liab = safe_val(p_bs, d, ['CurrentLiabilities'])
+        non_cur  = safe_val(p_bs, d, ['NoncurrentLiabilities'])
+        bps      = round(equity / shares, 2) if (shares > 0 and equity > 0) else 0
+        bs_rows.append({
+            '年度': str(d.year),
+            f'現金 ({unit})': round(cash / divisor, 1),
+            f'股東權益 ({unit})': round(equity / divisor, 1),
+            f'流動負債 ({unit})': round(cur_liab / divisor, 1),
+            f'非流動負債 ({unit})': round(non_cur / divisor, 1),
+            '每股淨值 (元)': bps,
+        })
+    bs_df = pd.DataFrame(bs_rows).set_index('年度') if bs_rows else pd.DataFrame()
+
+    return is_df, bs_df, unit
+
 # ==========================================
 # ✅ FIX A: yf.download 最新價格統一解析器
 # 相容新舊版 yfinance MultiIndex 格式
@@ -939,6 +1008,24 @@ with tab2:
                                 use_container_width=True
                             )
                         
+                        # === 近三年財報摘要 ===
+                        st.divider()
+                        st.subheader("📊 近三年財報摘要 (年度累計)")
+                        is_annual, bs_annual, unit_lbl = build_annual_financials_table(p_is, p_bs, shares)
+                        if is_annual is not None and not is_annual.empty:
+                            col_is, col_bs = st.columns(2)
+                            with col_is:
+                                st.caption(f"📈 損益表 (單位：{unit_lbl})")
+                                st.dataframe(is_annual, use_container_width=True)
+                            with col_bs:
+                                st.caption(f"🏦 資產負債表 (單位：{unit_lbl})")
+                                if bs_annual is not None and not bs_annual.empty:
+                                    st.dataframe(bs_annual, use_container_width=True)
+                                else:
+                                    st.info("無年度資產負債表資料")
+                        else:
+                            st.info("⚠️ 財報資料中無完整年度（12月）紀錄，無法建立年度摘要。")
+
                         # === My-TW-Coverage 質化資料 ===
                         st.divider()
                         st.subheader("📖 企業基本面與供應鏈 (來源: My-TW-Coverage)")
