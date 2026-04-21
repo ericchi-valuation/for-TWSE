@@ -715,6 +715,7 @@ def run_pit_backtest_local(sym, target_date, is_finance, industry_name):
 # UI 介面
 # ==========================================
 st.title("V7.4 Eric Chi 估值模型 (真實市值極速版)")
+st.caption(f"🔧 伺服器狀態：清單載入 {len(df_all)} 筆，IS庫載入 {len(DB_IS)} 筆，BS庫 {len(DB_BS)} 筆")
 tab1, tab2, tab3, tab4, tab5 = st.tabs(["全產業掃描", "單股深度查詢", "真·時光機回測", "⏳ 時點回測×全產業掃描", "🔥 主題概念掃描"])
 cols_display = ['股票代碼', '名稱', '現價', '營收成長率', '預估EPS', '營業利益率', '淨利率',
                 'P/E (TTM)', 'P/B (Lag)', 'P/S (Lag)', 'EV/EBITDA', 'DCF/DDM合理價區間',
@@ -951,7 +952,11 @@ with tab2:
 
                     p_is, p_bs, p_cf = get_stock_financials(sym)
                     if p_is.empty:
-                        st.error("❌ 本地資料庫中找不到這檔股票的財報！")
+                        # DEBUG: Print the clean_ticker and actual matched rows info
+                        clean_ticker = str(sym).replace('.TW', '').replace('.TWO', '').replace('*', '').strip()
+                        if clean_ticker.endswith('.0'): clean_ticker = clean_ticker[:-2]
+                        is_match_count = len(DB_IS[DB_IS['stock_id'].astype(str).str.strip().str.replace('.0','', regex=False) == clean_ticker]) if not DB_IS.empty else 0
+                        st.error(f"❌ 本地資料庫中找不到這檔股票的財報！\n\n(Debug) Parsing sym '{sym}' -> clean '{clean_ticker}'. matched IS rows: {is_match_count}")
                     else:
                         ld = p_is.index[0]
                         # ✅ TTM EPS: 近四季加總
