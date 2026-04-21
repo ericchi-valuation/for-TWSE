@@ -24,7 +24,7 @@ warnings.simplefilter(action='ignore', category=FutureWarning)
 #    讀取幾 KB 文字不到 1ms，不快取才能確保每次 F5 看到最新版本
 def get_qualitative_report(base_dir, ticker):
     """自動搜尋 My-TW-Coverage（含解壓縮後多層資料夾），讀取個股質化報告。"""
-    clean_ticker = str(ticker).replace('.TW', '').replace('.TWO', '').replace('*', '')
+    clean_ticker = str(ticker).replace('.TWO', '').replace('.TW', '').replace('*', '').strip()
     # ✅ 改用 app.py 所在的絕對路徑，不受 Streamlit 工作目錄影響
     app_dir = os.path.dirname(os.path.abspath(__file__))
     abs_base_dir = os.path.join(app_dir, base_dir)
@@ -186,7 +186,7 @@ def get_monthly_rev_growth(ticker):
     回傳 float 或 None（無資料時）。"""
     if DB_MR.empty:
         return None
-    clean = str(ticker).replace('.TW', '').replace('.TWO', '').replace('*', '')
+    clean = str(ticker).replace('.TWO', '').replace('.TW', '').replace('*', '').strip()
     df = DB_MR[DB_MR['stock_id'].astype(str) == clean].copy()
     if df.empty:
         return None
@@ -214,7 +214,8 @@ IND_PE_DEFAULT = {
 
 def get_stock_financials(ticker):
     # 徹底清除附屬名與星號，並去除可能潛藏的左右空白
-    clean_ticker = str(ticker).replace('.TW', '').replace('.TWO', '').replace('*', '').strip()
+    # 注意：必須先 replace('.TWO') 再 replace('.TW')，否則 '.TWO' 會被截一半變成 'O'
+    clean_ticker = str(ticker).replace('.TWO', '').replace('.TW', '').replace('*', '').strip()
     
     # 容災：萬一某種原因被存成了 '6488.0' 這種浮點字串
     if clean_ticker.endswith('.0'):
@@ -755,7 +756,7 @@ with tab1:
                 # 精算每一檔的真實市值：最新收盤價 * 本地股本
                 caps = []
                 for t in tickers_list:
-                    clean_ticker = str(t).replace('.TW', '').replace('.TWO', '').replace('*', '')
+                    clean_ticker = str(t).replace('.TWO', '').replace('.TW', '').replace('*', '').strip()
                     s_bs = DB_BS[
                         (DB_BS['stock_id'].astype(str) == clean_ticker) &
                         (DB_BS['type'].isin(['OrdinaryShare', 'CapitalStock', 'OrdinaryShare_per', 'CapitalStock_per']))
@@ -953,7 +954,7 @@ with tab2:
                     p_is, p_bs, p_cf = get_stock_financials(sym)
                     if p_is.empty:
                         # DEBUG: Print the clean_ticker and actual matched rows info
-                        clean_ticker = str(sym).replace('.TW', '').replace('.TWO', '').replace('*', '').strip()
+                        clean_ticker = str(sym).replace('.TWO', '').replace('.TW', '').replace('*', '').strip()
                         if clean_ticker.endswith('.0'): clean_ticker = clean_ticker[:-2]
                         is_match_count = len(DB_IS[DB_IS['stock_id'].astype(str).str.strip().str.replace('.0','', regex=False) == clean_ticker]) if not DB_IS.empty else 0
                         st.error(f"❌ 本地資料庫中找不到這檔股票的財報！\n\n(Debug) Parsing sym '{sym}' -> clean '{clean_ticker}'. matched IS rows: {is_match_count}")
@@ -1074,7 +1075,7 @@ with tab2:
 
                         # === 主題標籤 ===
                         all_themes_map = load_all_themes("My-TW-Coverage")
-                        clean_code = str(sym).replace('.TW', '').replace('.TWO', '').replace('*', '')
+                        clean_code = str(sym).replace('.TWO', '').replace('.TW', '').replace('*', '').strip()
                         stock_in_themes = {t: codes for t, codes in all_themes_map.items() if clean_code in codes}
                         if stock_in_themes:
                             st.divider()
