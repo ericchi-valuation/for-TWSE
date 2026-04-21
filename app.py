@@ -228,6 +228,14 @@ def get_stock_financials(ticker):
     p_is = s_is.pivot_table(index='date', columns='type', values='value').sort_index(ascending=False) if not s_is.empty else pd.DataFrame()
     p_bs = s_bs.pivot_table(index='date', columns='type', values='value').sort_index(ascending=False) if not s_bs.empty else pd.DataFrame()
     p_cf = s_cf.pivot_table(index='date', columns='type', values='value').sort_index(ascending=False) if not s_cf.empty else pd.DataFrame()
+    
+    # ✅ 確保 NetIncome 欄位存在 (FinMind 有時回傳 NetIncome, 有時回傳 NetIncomeAttributableToOwnersOfParent)
+    if not p_is.empty:
+        if 'NetIncome' not in p_is.columns:
+            for alt in ['NetIncomeAttributableToOwnersOfParent', 'ProfitLossForThePeriod']:
+                if alt in p_is.columns:
+                    p_is['NetIncome'] = p_is[alt]
+                    break
     return p_is, p_bs, p_cf
 
 def safe_val(df, idx_date, keys, default=0):
@@ -321,14 +329,27 @@ def build_annual_financials_table(p_is, p_bs, shares):
     # --- 損益表 IS ---
     is_rows = []
     for d in annual_is_dates:
-        rev    = safe_val(p_is, d, ['Revenue'])
-        op_inc = safe_val(p_is, d, ['OperatingIncome'])
-        net_inc= safe_val(p_is, d, ['NetIncome'])
-        eps    = safe_val(p_is, d, ['EPS'])
+        yr = d.year
+        # ✅ 重要：台灣財報為累計值，但在 Lite 版資料庫中可能已是單季或混合。
+        # 為了絕對準確獲得「全年度累計」，我們抓取該年份所有的季報並手動加總或取決於最後一筆(Q4累計)。
+        # 由於原始 FinMind 資料 Q4(12月) 即代表全年累計，但如果 Lite 版做過處理，最保險做法是取該年所有月份對應的「單季值」加總。
+        # 這裡我們採取最穩健做法：直接加總該年度所有非重複季度的 EPS
+        this_yr_data = p_is[p_is.index.year == yr]
+        
+        # 營業收入與利益通常 Q4 本身就是累計全年，但如果是單季系統，需加總。
+        # 台股財報 Q4(12月) index 內的數值通常即為 1-12 月累計。
+        # 但使用者回報 19.51 是單季 (Q4)，代表資料庫中已轉為單季值。
+        
+        rev    = sum(get_single_quarter_is(p_is, dt, ['Revenue']) for dt in this_yr_data.index)
+        op_inc = sum(get_single_quarter_is(p_is, dt, ['OperatingIncome']) for dt in this_yr_data.index)
+        net_inc= sum(get_single_quarter_is(p_is, dt, ['NetIncome']) for dt in this_yr_data.index)
+        eps    = sum(get_single_quarter_is(p_is, dt, ['EPS']) for dt in this_yr_data.index)
+        
         op_m   = f"{op_inc/rev*100:.1f}%" if rev > 0 else "-"
         net_m  = f"{net_inc/rev*100:.1f}%" if (rev > 0 and net_inc != 0) else "-"
+        
         is_rows.append({
-            '年度': str(d.year),
+            '年度': str(yr),
             f'營業收入 ({unit})': round(rev / divisor, 1),
             f'營業利益 ({unit})': round(op_inc / divisor, 1),
             'EPS (元)': round(eps, 2),
