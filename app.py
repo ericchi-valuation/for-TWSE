@@ -144,11 +144,21 @@ sim.on('tick',()=>{{
 # ==========================================
 @st.cache_data(show_spinner=False)
 def load_local_databases():
-    df_list = pd.read_csv('tw_stock_list.csv') if os.path.exists('tw_stock_list.csv') else pd.DataFrame()
+    # 使用絕對路徑確保 Streamlit 伺服器不會因 CWD 錯亂而讀到空檔案，
+    # 且修改此函數區塊可強力清除 Streamlit 雲端快取 (Cache Busting)
+    app_dir = os.path.dirname(os.path.abspath(__file__))
     
-    df_is = pd.read_parquet('tw_is_lite.parquet') if os.path.exists('tw_is_lite.parquet') else pd.DataFrame()
-    df_bs = pd.read_parquet('tw_bs_lite.parquet') if os.path.exists('tw_bs_lite.parquet') else pd.DataFrame()
-    df_cf = pd.read_parquet('tw_cf_lite.parquet') if os.path.exists('tw_cf_lite.parquet') else pd.DataFrame()
+    p_lst = os.path.join(app_dir, 'tw_stock_list.csv')
+    df_list = pd.read_csv(p_lst) if os.path.exists(p_lst) else pd.DataFrame()
+    
+    p_is = os.path.join(app_dir, 'tw_is_lite.parquet')
+    df_is = pd.read_parquet(p_is) if os.path.exists(p_is) else pd.DataFrame()
+    
+    p_bs = os.path.join(app_dir, 'tw_bs_lite.parquet')
+    df_bs = pd.read_parquet(p_bs) if os.path.exists(p_bs) else pd.DataFrame()
+    
+    p_cf = os.path.join(app_dir, 'tw_cf_lite.parquet')
+    df_cf = pd.read_parquet(p_cf) if os.path.exists(p_cf) else pd.DataFrame()
     
     if not df_is.empty: df_is['date'] = pd.to_datetime(df_is['date'])
     if not df_bs.empty: df_bs['date'] = pd.to_datetime(df_bs['date'])
@@ -203,10 +213,16 @@ IND_PE_DEFAULT = {
 }
 
 def get_stock_financials(ticker):
-    clean_ticker = str(ticker).replace('.TW', '').replace('.TWO', '').replace('*', '')
-    s_is = DB_IS[DB_IS['stock_id'].astype(str) == clean_ticker] if not DB_IS.empty else pd.DataFrame()
-    s_bs = DB_BS[DB_BS['stock_id'].astype(str) == clean_ticker] if not DB_BS.empty else pd.DataFrame()
-    s_cf = DB_CF[DB_CF['stock_id'].astype(str) == clean_ticker] if not DB_CF.empty else pd.DataFrame()
+    # 徹底清除附屬名與星號，並去除可能潛藏的左右空白
+    clean_ticker = str(ticker).replace('.TW', '').replace('.TWO', '').replace('*', '').strip()
+    
+    # 容災：萬一某種原因被存成了 '6488.0' 這種浮點字串
+    if clean_ticker.endswith('.0'):
+        clean_ticker = clean_ticker[:-2]
+        
+    s_is = DB_IS[DB_IS['stock_id'].astype(str).str.strip().str.replace('.0','', regex=False) == clean_ticker] if not DB_IS.empty else pd.DataFrame()
+    s_bs = DB_BS[DB_BS['stock_id'].astype(str).str.strip().str.replace('.0','', regex=False) == clean_ticker] if not DB_BS.empty else pd.DataFrame()
+    s_cf = DB_CF[DB_CF['stock_id'].astype(str).str.strip().str.replace('.0','', regex=False) == clean_ticker] if not DB_CF.empty else pd.DataFrame()
     
     p_is = s_is.pivot_table(index='date', columns='type', values='value').sort_index(ascending=False) if not s_is.empty else pd.DataFrame()
     p_bs = s_bs.pivot_table(index='date', columns='type', values='value').sort_index(ascending=False) if not s_bs.empty else pd.DataFrame()
