@@ -24,7 +24,7 @@ warnings.simplefilter(action='ignore', category=FutureWarning)
 #    讀取幾 KB 文字不到 1ms，不快取才能確保每次 F5 看到最新版本
 def get_qualitative_report(base_dir, ticker):
     """自動搜尋 My-TW-Coverage（含解壓縮後多層資料夾），讀取個股質化報告。"""
-    clean_ticker = str(ticker).replace('.TW', '').replace('.TWO', '')
+    clean_ticker = str(ticker).replace('.TW', '').replace('.TWO', '').replace('*', '')
     # ✅ 改用 app.py 所在的絕對路徑，不受 Streamlit 工作目錄影響
     app_dir = os.path.dirname(os.path.abspath(__file__))
     abs_base_dir = os.path.join(app_dir, base_dir)
@@ -176,7 +176,7 @@ def get_monthly_rev_growth(ticker):
     回傳 float 或 None（無資料時）。"""
     if DB_MR.empty:
         return None
-    clean = str(ticker).replace('.TW', '').replace('.TWO', '')
+    clean = str(ticker).replace('.TW', '').replace('.TWO', '').replace('*', '')
     df = DB_MR[DB_MR['stock_id'].astype(str) == clean].copy()
     if df.empty:
         return None
@@ -203,7 +203,7 @@ IND_PE_DEFAULT = {
 }
 
 def get_stock_financials(ticker):
-    clean_ticker = str(ticker).replace('.TW', '').replace('.TWO', '')
+    clean_ticker = str(ticker).replace('.TW', '').replace('.TWO', '').replace('*', '')
     s_is = DB_IS[DB_IS['stock_id'].astype(str) == clean_ticker] if not DB_IS.empty else pd.DataFrame()
     s_bs = DB_BS[DB_BS['stock_id'].astype(str) == clean_ticker] if not DB_BS.empty else pd.DataFrame()
     s_cf = DB_CF[DB_CF['stock_id'].astype(str) == clean_ticker] if not DB_CF.empty else pd.DataFrame()
@@ -738,7 +738,7 @@ with tab1:
                 # 精算每一檔的真實市值：最新收盤價 * 本地股本
                 caps = []
                 for t in tickers_list:
-                    clean_ticker = str(t).replace('.TW', '').replace('.TWO', '')
+                    clean_ticker = str(t).replace('.TW', '').replace('.TWO', '').replace('*', '')
                     s_bs = DB_BS[
                         (DB_BS['stock_id'].astype(str) == clean_ticker) &
                         (DB_BS['type'].isin(['OrdinaryShare', 'CapitalStock', 'OrdinaryShare_per', 'CapitalStock_per']))
@@ -885,18 +885,34 @@ with tab1:
 # ==========================================
 # Tab 2. 單股深度查詢
 # ==========================================
+def resolve_ticker(sym_str, df_all):
+    sym = sym_str.strip().upper()
+    if sym.endswith('.TW') or sym.endswith('.TWO'):
+        return sym
+    
+    clean_sym = sym.replace('*', '')
+    if not df_all.empty:
+        match = df_all[df_all['Code'].astype(str).str.replace('*', '', regex=False) == clean_sym]
+        if not match.empty:
+            return match.iloc[0]['Ticker']
+            
+    # 如果本地清單沒抓到，智能判斷 .TW 或 .TWO
+    tw_sym = f"{clean_sym}.TW"
+    try:
+        # 用 history 測一下上市代碼存不存在
+        if not yf.Ticker(tw_sym).history(period="1d").empty:
+            return tw_sym
+    except:
+        pass
+    
+    return f"{clean_sym}.TWO"
+
 with tab2:
     c_in, c_out = st.columns([1, 2])
     with c_in:
         sym_input = st.text_input("輸入代碼:", value="2330")
         if st.button("查詢", type="primary"):
-            sym = sym_input.strip().upper()
-            if not sym.endswith('.TW') and not sym.endswith('.TWO'):
-                if not df_all.empty:
-                    match = df_all[df_all['Code'].astype(str) == str(sym)]
-                    sym = match.iloc[0]['Ticker'] if not match.empty else f"{sym}.TW"
-                else:
-                    sym = f"{sym}.TW"
+            sym = resolve_ticker(sym_input, df_all)
 
             with st.spinner(f"正在穿透防火牆解析 ({sym})..."):
                 try:
@@ -1037,7 +1053,7 @@ with tab2:
 
                         # === 主題標籤 ===
                         all_themes_map = load_all_themes("My-TW-Coverage")
-                        clean_code = str(sym).replace('.TW', '').replace('.TWO', '')
+                        clean_code = str(sym).replace('.TW', '').replace('.TWO', '').replace('*', '')
                         stock_in_themes = {t: codes for t, codes in all_themes_map.items() if clean_code in codes}
                         if stock_in_themes:
                             st.divider()
@@ -1078,14 +1094,7 @@ with tab3:
         for sym in t_list_raw:
             if not sym:
                 continue
-            if not sym.endswith('.TW') and not sym.endswith('.TWO'):
-                if not df_all.empty:
-                    match = df_all[df_all['Code'].astype(str) == str(sym)]
-                    t_list.append(match.iloc[0]['Ticker'] if not match.empty else f"{sym}.TW")
-                else:
-                    t_list.append(f"{sym}.TW")
-            else:
-                t_list.append(sym)
+            t_list.append(resolve_ticker(sym, df_all))
 
         pb = st.progress(0)
         res_list = []
