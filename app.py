@@ -751,11 +751,19 @@ with tab1:
     if df_all.empty:
         st.error("❌ 找不到本地資料庫 (tw_stock_list.csv)。")
     else:
-        selected_inds = st.multiselect(
+        # 計算每個產業的股票數量，讓選項顯示如 "半導體業 (150檔)"
+        ind_counts = df_all['Industry'].value_counts()
+        ind_options = sorted([f"{i} ({ind_counts.get(i, 0)}檔)" for i in df_all['Industry'].unique() if pd.notna(i)])
+        default_opt = [opt for opt in ind_options if "半導體業" in opt]
+
+        selected_inds_raw = st.multiselect(
             "選擇掃描產業 (可多選):",
-            sorted([i for i in df_all['Industry'].unique()]),
-            default=["半導體業"]
+            ind_options,
+            default=default_opt
         )
+        
+        # 將 "半導體業 (150檔)" 還原回 "半導體業"，供後續過濾使用
+        selected_inds = [opt.split(' (')[0] for opt in selected_inds_raw]
         if st.button("執行產業掃描", type="primary") and selected_inds:
             pb = st.progress(0)
             status_text = st.empty()
@@ -1067,23 +1075,43 @@ with tab2:
                                 use_container_width=True
                             )
                         
-                        # === 近三年財報摘要 ===
+                        # === 近三年財報摘要 (yfinance 即時版) ===
                         st.divider()
-                        st.subheader("📊 近三年財報摘要 (年度累計)")
-                        is_annual, bs_annual, unit_lbl = build_annual_financials_table(p_is, p_bs, shares)
-                        if is_annual is not None and not is_annual.empty:
-                            col_is, col_bs = st.columns(2)
-                            with col_is:
-                                st.caption(f"📈 損益表 (單位：{unit_lbl})")
-                                st.dataframe(is_annual, use_container_width=True)
-                            with col_bs:
-                                st.caption(f"🏦 資產負債表 (單位：{unit_lbl})")
-                                if bs_annual is not None and not bs_annual.empty:
-                                    st.dataframe(bs_annual, use_container_width=True)
-                                else:
-                                    st.info("無年度資產負債表資料")
-                        else:
-                            st.info("⚠️ 財報資料中無完整年度（12月）紀錄，無法建立年度摘要。")
+                        st.subheader("📊 關鍵財務數據 (來源: yfinance, 單位: 百萬台幣)")
+                        
+                        import sys
+                        import os
+                        script_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'My-TW-Coverage', 'My-TW-Coverage-master', 'scripts')
+                        if script_dir not in sys.path:
+                            sys.path.insert(0, script_dir)
+                            
+                        try:
+                            from update_financials import fetch_financials
+                            # fetch_financials 內部會自動處理 .TW / .TWO
+                            clean_sym_for_yf = str(sym).replace('.TW', '').replace('.TWO', '')
+                            with st.spinner("從 yfinance 下載詳細財報..."):
+                                fin_data = fetch_financials(clean_sym_for_yf)
+                            
+                            if fin_data:
+                                col_ann, col_qtr = st.columns(2)
+                                with col_ann:
+                                    st.caption("📈 年度財報 (近 3 年)")
+                                    if fin_data["annual"] is not None and not fin_data["annual"].empty:
+                                        # 在 Streamlit 中完美呈現：套用兩位小數格式，NaN 顯示為 -
+                                        st.dataframe(fin_data["annual"].style.format("{:.2f}", na_rep="-"), use_container_width=True)
+                                    else:
+                                        st.info("無年度資料")
+                                        
+                                with col_qtr:
+                                    st.caption("📉 季度財報 (近 4 季)")
+                                    if fin_data["quarterly"] is not None and not fin_data["quarterly"].empty:
+                                        st.dataframe(fin_data["quarterly"].style.format("{:.2f}", na_rep="-"), use_container_width=True)
+                                    else:
+                                        st.info("無季度資料")
+                            else:
+                                st.warning("⚠️ 無法從 yfinance 取得該公司的詳細財報資料。")
+                        except Exception as e:
+                            st.error(f"載入 yfinance 財報模組失敗: {e}")
 
                         # === My-TW-Coverage 質化資料 ===
                         st.divider()
@@ -1439,7 +1467,7 @@ with tab5:
                     if scores5['Total'] < min_score_t5:
                         continue
 
-                    clean5  = str(sym5).replace('.TW', '').replace('.TWO', '')
+                    clean5  = str(sym5).replace('.TW', '').replace('.TWO', '').replace('*', '').strip()
                     op_rev5 = safe_val(p_is5, ld5, ['Revenue'])
                     raw_t5.append({
                         '股票代碼' : sym5,
