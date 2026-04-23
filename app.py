@@ -1100,19 +1100,35 @@ with tab2:
                             # --- 備援機制：如果 yfinance 失敗，從本地極速版 Parquet 抽取數據 ---
                             if not fin_data:
                                 st.info("💡 yfinance 連線受阻，正在切換至本地資料庫備援...")
-                                def extract_local_metrics(df_is, df_cf):
+                                def extract_local_metrics(df_is, df_cf, is_annual=False):
                                     if df_is.empty: return None
-                                    # 抓取最近 4 期
-                                    dates = df_is.index[:4]
+                                    
+                                    if is_annual:
+                                        dates = sorted([d for d in df_is.index if hasattr(d, 'month') and d.month == 12], reverse=True)[:3]
+                                    else:
+                                        dates = df_is.index[:4]
+                                        
+                                    if not dates: return None
+                                    
                                     data = {}
                                     for d in dates:
-                                        # 獲取單季值 (因為本地庫是累積的，需要剝離)
-                                        rev = get_single_quarter_is(df_is, d, ['Revenue'])
-                                        op_inc = get_single_quarter_is(df_is, d, ['OperatingIncome'])
-                                        net_inc = get_single_quarter_is(df_is, d, ['NetIncome'])
-                                        ocf = get_single_quarter_cf(df_cf, [d], ['CashFlowsFromOperatingActivities'])
+                                        if is_annual:
+                                            yr = d.year
+                                            this_yr_is = df_is[df_is.index.year == yr]
+                                            this_yr_cf = df_cf[df_cf.index.year == yr] if not df_cf.empty else pd.DataFrame()
+                                            rev = sum(get_single_quarter_is(df_is, dt, ['Revenue']) for dt in this_yr_is.index)
+                                            op_inc = sum(get_single_quarter_is(df_is, dt, ['OperatingIncome']) for dt in this_yr_is.index)
+                                            net_inc = sum(get_single_quarter_is(df_is, dt, ['NetIncome']) for dt in this_yr_is.index)
+                                            ocf = sum(get_single_quarter_cf(df_cf, [dt], ['CashFlowsFromOperatingActivities']) for dt in this_yr_cf.index)
+                                            label = d.strftime('%Y-%m-%d')
+                                        else:
+                                            rev = get_single_quarter_is(df_is, d, ['Revenue'])
+                                            op_inc = get_single_quarter_is(df_is, d, ['OperatingIncome'])
+                                            net_inc = get_single_quarter_is(df_is, d, ['NetIncome'])
+                                            ocf = get_single_quarter_cf(df_cf, [d], ['CashFlowsFromOperatingActivities'])
+                                            label = d.strftime('%Y-%m-%d')
                                         
-                                        data[d.strftime('%Y-%m-%d')] = {
+                                        data[label] = {
                                             "Revenue": rev / 1_000_000,
                                             "Operating Income": op_inc / 1_000_000,
                                             "Net Income": net_inc / 1_000_000,
@@ -1122,8 +1138,9 @@ with tab2:
                                         }
                                     return pd.DataFrame(data)
 
-                                local_q = extract_local_metrics(p_is, p_cf)
-                                fin_data = {"annual": None, "quarterly": local_q}
+                                local_a = extract_local_metrics(p_is, p_cf, is_annual=True)
+                                local_q = extract_local_metrics(p_is, p_cf, is_annual=False)
+                                fin_data = {"annual": local_a, "quarterly": local_q}
                             
                             if fin_data:
                                 col_ann, col_qtr = st.columns(2)
