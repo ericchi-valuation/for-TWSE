@@ -188,7 +188,11 @@ def fetch_financials(ticker):
                 "industry": info.get("industry", "N/A"),
                 "suffix": suffix,
             }
-        except Exception:
+        except Exception as e:
+            import traceback
+            with open("C:/Users/a0875/.gemini/antigravity/scratch/yf_error.log", "a", encoding="utf-8") as f:
+                f.write(f"Error for {ticker}{suffix}:\n")
+                traceback.print_exc(file=f)
             continue
     return None
 
