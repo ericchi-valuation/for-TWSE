@@ -1108,7 +1108,7 @@ with tab2:
                                     else:
                                         dates = df_is.index[:4]
                                         
-                                    if not dates: return None
+                                    if len(dates) == 0: return None
                                     
                                     data = {}
                                     for d in dates:
