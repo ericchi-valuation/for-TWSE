@@ -128,11 +128,13 @@ def extract_metrics(income_stmt, cashflow):
 
 def fetch_financials(ticker):
     """Fetch financial data. Tries .TW then .TWO suffix."""
+    last_err = None
     for suffix in [".TW", ".TWO"]:
         try:
             stock = yf.Ticker(f"{ticker}{suffix}")
             income = stock.income_stmt
             if income is None or income.empty:
+                last_err = f"{ticker}{suffix} returned empty income statement"
                 continue
 
             df_annual = extract_metrics(stock.income_stmt, stock.cashflow)
@@ -189,12 +191,9 @@ def fetch_financials(ticker):
                 "suffix": suffix,
             }
         except Exception as e:
-            import traceback
-            with open("C:/Users/a0875/.gemini/antigravity/scratch/yf_error.log", "a", encoding="utf-8") as f:
-                f.write(f"Error for {ticker}{suffix}:\n")
-                traceback.print_exc(file=f)
+            last_err = str(e)
             continue
-    return None
+    raise Exception(f"yfinance fetch failed for both .TW and .TWO. Last error: {last_err}")
 
 
 def df_to_clean_markdown(df):
