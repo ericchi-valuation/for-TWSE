@@ -23,6 +23,17 @@ import time
 
 import pandas as pd
 import yfinance as yf
+import requests
+
+def get_yf_session():
+    """Create a session with a browser-like User-Agent to avoid being blocked."""
+    session = requests.Session()
+    session.headers.update({
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    })
+    return session
+
+YF_SESSION = get_yf_session()
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from utils import (
@@ -131,13 +142,29 @@ def fetch_financials(ticker):
     last_err = None
     for suffix in [".TW", ".TWO"]:
         try:
-            stock = yf.Ticker(f"{ticker}{suffix}")
+            full_sym = f"{ticker}{suffix}"
+            stock = yf.Ticker(full_sym, session=YF_SESSION)
+            
+            # 優先嘗試新版 property
             income = stock.income_stmt
+            # 備援 1: 嘗試舊版 property
             if income is None or income.empty:
-                last_err = f"{ticker}{suffix} returned empty income statement"
+                income = stock.financials
+            # 備援 2: 嘗試直接呼叫 method
+            if income is None or income.empty:
+                try: income = stock.get_income_stmt()
+                except: pass
+                
+            if income is None or income.empty:
+                last_err = f"{full_sym} income statement is still empty"
                 continue
-
-            df_annual = extract_metrics(stock.income_stmt, stock.cashflow)
+                
+            # 同理處理現金流量表
+            cf = stock.cashflow
+            if cf is None or cf.empty:
+                cf = stock.get_cashflow()
+                
+            df_annual = extract_metrics(income, cf)
             if not df_annual.empty:
                 if "Revenue" in df_annual.index:
                     valid_cols = df_annual.columns[df_annual.loc["Revenue"].notna()]
@@ -150,9 +177,16 @@ def fetch_financials(ticker):
                 df_annual.loc[non_pct] = df_annual.loc[non_pct] / 1_000_000
                 df_annual = df_annual.iloc[:, :3]
 
-            df_quarterly = extract_metrics(
-                stock.quarterly_income_stmt, stock.quarterly_cashflow
-            )
+            # 處理季度財報
+            q_income = stock.quarterly_income_stmt
+            if q_income is None or q_income.empty:
+                q_income = stock.quarterly_financials
+                
+            q_cf = stock.quarterly_cashflow
+            if q_cf is None or q_cf.empty:
+                q_cf = stock.get_quarterly_cashflow()
+
+            df_quarterly = extract_metrics(q_income, q_cf)
             if not df_quarterly.empty:
                 # Drop quarters where Revenue is NaN (unreported)
                 if "Revenue" in df_quarterly.index:
