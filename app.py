@@ -1085,82 +1085,23 @@ with tab2:
                         if script_dir not in sys.path:
                             sys.path.insert(0, script_dir)
                             
-                        try:
-                            from update_financials import fetch_financials
-                            clean_sym_for_yf = str(sym).replace('.TW', '').replace('.TWO', '')
-                            fin_data = None
-                            
-                            try:
-                                with st.spinner("從 yfinance 下載詳細財報..."):
-                                    fin_data = fetch_financials(clean_sym_for_yf)
-                            except Exception as yf_e:
-                                # 攔截 yfinance 拋出的錯誤，確保能進入下方的備援機制
-                                print(f"yfinance fetch failed: {yf_e}")
-                            
-                            # --- 備援機制：如果 yfinance 失敗，從本地極速版 Parquet 抽取數據 ---
-                            if not fin_data:
-                                st.info("💡 yfinance 連線受阻，正在切換至本地資料庫備援...")
-                                def extract_local_metrics(df_is, df_cf, is_annual=False):
-                                    if df_is.empty: return None
-                                    
-                                    if is_annual:
-                                        dates = sorted([d for d in df_is.index if hasattr(d, 'month') and d.month == 12], reverse=True)[:3]
-                                    else:
-                                        dates = df_is.index[:4]
-                                        
-                                    if len(dates) == 0: return None
-                                    
-                                    data = {}
-                                    for d in dates:
-                                        if is_annual:
-                                            yr = d.year
-                                            this_yr_is = df_is[df_is.index.year == yr]
-                                            this_yr_cf = df_cf[df_cf.index.year == yr] if not df_cf.empty else pd.DataFrame()
-                                            rev = sum(get_single_quarter_is(df_is, dt, ['Revenue']) for dt in this_yr_is.index)
-                                            op_inc = sum(get_single_quarter_is(df_is, dt, ['OperatingIncome']) for dt in this_yr_is.index)
-                                            net_inc = sum(get_single_quarter_is(df_is, dt, ['NetIncome']) for dt in this_yr_is.index)
-                                            ocf = sum(get_single_quarter_cf(df_cf, [dt], ['CashFlowsFromOperatingActivities']) for dt in this_yr_cf.index)
-                                            label = d.strftime('%Y-%m-%d')
-                                        else:
-                                            rev = get_single_quarter_is(df_is, d, ['Revenue'])
-                                            op_inc = get_single_quarter_is(df_is, d, ['OperatingIncome'])
-                                            net_inc = get_single_quarter_is(df_is, d, ['NetIncome'])
-                                            ocf = get_single_quarter_cf(df_cf, [d], ['CashFlowsFromOperatingActivities'])
-                                            label = d.strftime('%Y-%m-%d')
-                                        
-                                        data[label] = {
-                                            "Revenue": rev / 1_000_000,
-                                            "Operating Income": op_inc / 1_000_000,
-                                            "Net Income": net_inc / 1_000_000,
-                                            "Op Cash Flow": ocf / 1_000_000,
-                                            "Operating Margin (%)": (op_inc/rev*100) if rev > 0 else 0,
-                                            "Net Margin (%)": (net_inc/rev*100) if rev > 0 else 0,
-                                        }
-                                    return pd.DataFrame(data)
-
-                                local_a = extract_local_metrics(p_is, p_cf, is_annual=True)
-                                local_q = extract_local_metrics(p_is, p_cf, is_annual=False)
-                                fin_data = {"annual": local_a, "quarterly": local_q}
-                            
-                            if fin_data:
-                                col_ann, col_qtr = st.columns(2)
-                                with col_ann:
-                                    st.caption("📈 年度財報 (近 3 年)")
-                                    if fin_data["annual"] is not None and not fin_data["annual"].empty:
-                                        st.dataframe(fin_data["annual"].style.format("{:.2f}", na_rep="-"), use_container_width=True)
-                                    else:
-                                        st.info("年度資料需透過 yfinance 獲取（目前受阻）")
-                                        
-                                with col_qtr:
-                                    st.caption("📉 季度財報 (近 4 季)")
-                                    if fin_data["quarterly"] is not None and not fin_data["quarterly"].empty:
-                                        st.dataframe(fin_data["quarterly"].style.format("{:.2f}", na_rep="-"), use_container_width=True)
-                                    else:
-                                        st.info("無季度資料")
-                            else:
-                                st.warning("⚠️ 無法獲取該公司的財務明細資料。")
-                        except Exception as e:
-                            st.error(f"財務數據模組執行異常: {e}")
+                        # === 近三年財報摘要 ===
+                        st.divider()
+                        st.subheader("📊 近三年財報摘要 (年度累計)")
+                        is_annual, bs_annual, unit_lbl = build_annual_financials_table(p_is, p_bs, shares)
+                        if is_annual is not None and not is_annual.empty:
+                            col_is, col_bs = st.columns(2)
+                            with col_is:
+                                st.caption(f"📈 損益表 (單位：{unit_lbl})")
+                                st.dataframe(is_annual, use_container_width=True)
+                            with col_bs:
+                                st.caption(f"🏦 資產負債表 (單位：{unit_lbl})")
+                                if bs_annual is not None and not bs_annual.empty:
+                                    st.dataframe(bs_annual, use_container_width=True)
+                                else:
+                                    st.info("無年度資產負債表資料")
+                        else:
+                            st.info("⚠️ 財報資料中無完整年度（12月）紀錄，無法建立年度摘要。")
 
                         # === My-TW-Coverage 質化資料 ===
                         st.divider()
