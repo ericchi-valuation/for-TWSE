@@ -1087,20 +1087,46 @@ with tab2:
                             
                         try:
                             from update_financials import fetch_financials
-                            # fetch_financials 內部會自動處理 .TW / .TWO
                             clean_sym_for_yf = str(sym).replace('.TW', '').replace('.TWO', '')
                             with st.spinner("從 yfinance 下載詳細財報..."):
                                 fin_data = fetch_financials(clean_sym_for_yf)
+                            
+                            # --- 備援機制：如果 yfinance 失敗，從本地極速版 Parquet 抽取數據 ---
+                            if not fin_data:
+                                st.info("💡 yfinance 連線受阻，正在切換至本地資料庫備援...")
+                                def extract_local_metrics(df_is, df_cf):
+                                    if df_is.empty: return None
+                                    # 抓取最近 4 期
+                                    dates = df_is.index[:4]
+                                    data = {}
+                                    for d in dates:
+                                        # 獲取單季值 (因為本地庫是累積的，需要剝離)
+                                        rev = get_single_quarter_is(df_is, d, ['Revenue'])
+                                        op_inc = get_single_quarter_is(df_is, d, ['OperatingIncome'])
+                                        net_inc = get_single_quarter_is(df_is, d, ['NetIncome'])
+                                        ocf = get_single_quarter_cf(df_cf, [d], ['CashFlowsFromOperatingActivities'])
+                                        
+                                        data[d.strftime('%Y-%m-%d')] = {
+                                            "Revenue": rev / 1_000_000,
+                                            "Operating Income": op_inc / 1_000_000,
+                                            "Net Income": net_inc / 1_000_000,
+                                            "Op Cash Flow": ocf / 1_000_000,
+                                            "Operating Margin (%)": (op_inc/rev*100) if rev > 0 else 0,
+                                            "Net Margin (%)": (net_inc/rev*100) if rev > 0 else 0,
+                                        }
+                                    return pd.DataFrame(data)
+
+                                local_q = extract_local_metrics(p_is, p_cf)
+                                fin_data = {"annual": None, "quarterly": local_q}
                             
                             if fin_data:
                                 col_ann, col_qtr = st.columns(2)
                                 with col_ann:
                                     st.caption("📈 年度財報 (近 3 年)")
                                     if fin_data["annual"] is not None and not fin_data["annual"].empty:
-                                        # 在 Streamlit 中完美呈現：套用兩位小數格式，NaN 顯示為 -
                                         st.dataframe(fin_data["annual"].style.format("{:.2f}", na_rep="-"), use_container_width=True)
                                     else:
-                                        st.info("無年度資料")
+                                        st.info("年度資料需透過 yfinance 獲取（目前受阻）")
                                         
                                 with col_qtr:
                                     st.caption("📉 季度財報 (近 4 季)")
@@ -1109,9 +1135,9 @@ with tab2:
                                     else:
                                         st.info("無季度資料")
                             else:
-                                st.warning("⚠️ 無法從 yfinance 取得該公司的詳細財報資料。")
+                                st.warning("⚠️ 無法獲取該公司的財務明細資料。")
                         except Exception as e:
-                            st.error(f"載入 yfinance 財報模組失敗: {e}")
+                            st.error(f"財務數據模組執行異常: {e}")
 
                         # === My-TW-Coverage 質化資料 ===
                         st.divider()
