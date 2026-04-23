@@ -23,17 +23,6 @@ import time
 
 import pandas as pd
 import yfinance as yf
-import requests
-
-def get_yf_session():
-    """Create a session with a browser-like User-Agent to avoid being blocked."""
-    session = requests.Session()
-    session.headers.update({
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-    })
-    return session
-
-YF_SESSION = get_yf_session()
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from utils import (
@@ -143,7 +132,7 @@ def fetch_financials(ticker):
     for suffix in [".TW", ".TWO"]:
         try:
             full_sym = f"{ticker}{suffix}"
-            stock = yf.Ticker(full_sym, session=YF_SESSION)
+            stock = yf.Ticker(full_sym)
             
             # 優先嘗試新版 property
             income = stock.income_stmt
