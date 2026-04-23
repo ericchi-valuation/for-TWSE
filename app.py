@@ -1088,8 +1088,14 @@ with tab2:
                         try:
                             from update_financials import fetch_financials
                             clean_sym_for_yf = str(sym).replace('.TW', '').replace('.TWO', '')
-                            with st.spinner("從 yfinance 下載詳細財報..."):
-                                fin_data = fetch_financials(clean_sym_for_yf)
+                            fin_data = None
+                            
+                            try:
+                                with st.spinner("從 yfinance 下載詳細財報..."):
+                                    fin_data = fetch_financials(clean_sym_for_yf)
+                            except Exception as yf_e:
+                                # 攔截 yfinance 拋出的錯誤，確保能進入下方的備援機制
+                                print(f"yfinance fetch failed: {yf_e}")
                             
                             # --- 備援機制：如果 yfinance 失敗，從本地極速版 Parquet 抽取數據 ---
                             if not fin_data:
