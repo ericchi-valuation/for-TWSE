@@ -24,7 +24,7 @@ warnings.simplefilter(action='ignore', category=FutureWarning)
 #    讀取幾 KB 文字不到 1ms，不快取才能確保每次 F5 看到最新版本
 def get_qualitative_report(base_dir, ticker):
     """自動搜尋 My-TW-Coverage（含解壓縮後多層資料夾），讀取個股質化報告。"""
-    clean_ticker = str(ticker).replace('.TW', '').replace('.TWO', '')
+    clean_ticker = str(ticker).replace('.TWO', '').replace('.TW', '').replace('*', '').strip()
     # ✅ 改用 app.py 所在的絕對路徑，不受 Streamlit 工作目錄影響
     app_dir = os.path.dirname(os.path.abspath(__file__))
     abs_base_dir = os.path.join(app_dir, base_dir)
@@ -144,11 +144,21 @@ sim.on('tick',()=>{{
 # ==========================================
 @st.cache_data(show_spinner=False)
 def load_local_databases():
-    df_list = pd.read_csv('tw_stock_list.csv') if os.path.exists('tw_stock_list.csv') else pd.DataFrame()
+    # 使用絕對路徑確保 Streamlit 伺服器不會因 CWD 錯亂而讀到空檔案，
+    # 且修改此函數區塊可強力清除 Streamlit 雲端快取 (Cache Busting)
+    app_dir = os.path.dirname(os.path.abspath(__file__))
     
-    df_is = pd.read_parquet('tw_is_lite.parquet') if os.path.exists('tw_is_lite.parquet') else pd.DataFrame()
-    df_bs = pd.read_parquet('tw_bs_lite.parquet') if os.path.exists('tw_bs_lite.parquet') else pd.DataFrame()
-    df_cf = pd.read_parquet('tw_cf_lite.parquet') if os.path.exists('tw_cf_lite.parquet') else pd.DataFrame()
+    p_lst = os.path.join(app_dir, 'tw_stock_list.csv')
+    df_list = pd.read_csv(p_lst) if os.path.exists(p_lst) else pd.DataFrame()
+    
+    p_is = os.path.join(app_dir, 'tw_is_lite.parquet')
+    df_is = pd.read_parquet(p_is) if os.path.exists(p_is) else pd.DataFrame()
+    
+    p_bs = os.path.join(app_dir, 'tw_bs_lite.parquet')
+    df_bs = pd.read_parquet(p_bs) if os.path.exists(p_bs) else pd.DataFrame()
+    
+    p_cf = os.path.join(app_dir, 'tw_cf_lite.parquet')
+    df_cf = pd.read_parquet(p_cf) if os.path.exists(p_cf) else pd.DataFrame()
     
     if not df_is.empty: df_is['date'] = pd.to_datetime(df_is['date'])
     if not df_bs.empty: df_bs['date'] = pd.to_datetime(df_bs['date'])
@@ -176,7 +186,7 @@ def get_monthly_rev_growth(ticker):
     回傳 float 或 None（無資料時）。"""
     if DB_MR.empty:
         return None
-    clean = str(ticker).replace('.TW', '').replace('.TWO', '')
+    clean = str(ticker).replace('.TWO', '').replace('.TW', '').replace('*', '').strip()
     df = DB_MR[DB_MR['stock_id'].astype(str) == clean].copy()
     if df.empty:
         return None
@@ -203,14 +213,29 @@ IND_PE_DEFAULT = {
 }
 
 def get_stock_financials(ticker):
-    clean_ticker = str(ticker).replace('.TW', '').replace('.TWO', '')
-    s_is = DB_IS[DB_IS['stock_id'].astype(str) == clean_ticker] if not DB_IS.empty else pd.DataFrame()
-    s_bs = DB_BS[DB_BS['stock_id'].astype(str) == clean_ticker] if not DB_BS.empty else pd.DataFrame()
-    s_cf = DB_CF[DB_CF['stock_id'].astype(str) == clean_ticker] if not DB_CF.empty else pd.DataFrame()
+    # 徹底清除附屬名與星號，並去除可能潛藏的左右空白
+    # 注意：必須先 replace('.TWO') 再 replace('.TW')，否則 '.TWO' 會被截一半變成 'O'
+    clean_ticker = str(ticker).replace('.TWO', '').replace('.TW', '').replace('*', '').strip()
+    
+    # 容災：萬一某種原因被存成了 '6488.0' 這種浮點字串
+    if clean_ticker.endswith('.0'):
+        clean_ticker = clean_ticker[:-2]
+        
+    s_is = DB_IS[DB_IS['stock_id'].astype(str).str.strip().str.replace('.0','', regex=False) == clean_ticker] if not DB_IS.empty else pd.DataFrame()
+    s_bs = DB_BS[DB_BS['stock_id'].astype(str).str.strip().str.replace('.0','', regex=False) == clean_ticker] if not DB_BS.empty else pd.DataFrame()
+    s_cf = DB_CF[DB_CF['stock_id'].astype(str).str.strip().str.replace('.0','', regex=False) == clean_ticker] if not DB_CF.empty else pd.DataFrame()
     
     p_is = s_is.pivot_table(index='date', columns='type', values='value').sort_index(ascending=False) if not s_is.empty else pd.DataFrame()
     p_bs = s_bs.pivot_table(index='date', columns='type', values='value').sort_index(ascending=False) if not s_bs.empty else pd.DataFrame()
     p_cf = s_cf.pivot_table(index='date', columns='type', values='value').sort_index(ascending=False) if not s_cf.empty else pd.DataFrame()
+    
+    # ✅ 確保 NetIncome 欄位存在 (FinMind 有時回傳 NetIncome, 有時回傳 NetIncomeAttributableToOwnersOfParent)
+    if not p_is.empty:
+        if 'NetIncome' not in p_is.columns:
+            for alt in ['NetIncomeAttributableToOwnersOfParent', 'ProfitLossForThePeriod']:
+                if alt in p_is.columns:
+                    p_is['NetIncome'] = p_is[alt]
+                    break
     return p_is, p_bs, p_cf
 
 def safe_val(df, idx_date, keys, default=0):
@@ -304,14 +329,27 @@ def build_annual_financials_table(p_is, p_bs, shares):
     # --- 損益表 IS ---
     is_rows = []
     for d in annual_is_dates:
-        rev    = safe_val(p_is, d, ['Revenue'])
-        op_inc = safe_val(p_is, d, ['OperatingIncome'])
-        net_inc= safe_val(p_is, d, ['NetIncome'])
-        eps    = safe_val(p_is, d, ['EPS'])
+        yr = d.year
+        # ✅ 重要：台灣財報為累計值，但在 Lite 版資料庫中可能已是單季或混合。
+        # 為了絕對準確獲得「全年度累計」，我們抓取該年份所有的季報並手動加總或取決於最後一筆(Q4累計)。
+        # 由於原始 FinMind 資料 Q4(12月) 即代表全年累計，但如果 Lite 版做過處理，最保險做法是取該年所有月份對應的「單季值」加總。
+        # 這裡我們採取最穩健做法：直接加總該年度所有非重複季度的 EPS
+        this_yr_data = p_is[p_is.index.year == yr]
+        
+        # 營業收入與利益通常 Q4 本身就是累計全年，但如果是單季系統，需加總。
+        # 台股財報 Q4(12月) index 內的數值通常即為 1-12 月累計。
+        # 但使用者回報 19.51 是單季 (Q4)，代表資料庫中已轉為單季值。
+        
+        rev    = sum(get_single_quarter_is(p_is, dt, ['Revenue']) for dt in this_yr_data.index)
+        op_inc = sum(get_single_quarter_is(p_is, dt, ['OperatingIncome']) for dt in this_yr_data.index)
+        net_inc= sum(get_single_quarter_is(p_is, dt, ['NetIncome']) for dt in this_yr_data.index)
+        eps    = sum(get_single_quarter_is(p_is, dt, ['EPS']) for dt in this_yr_data.index)
+        
         op_m   = f"{op_inc/rev*100:.1f}%" if rev > 0 else "-"
         net_m  = f"{net_inc/rev*100:.1f}%" if (rev > 0 and net_inc != 0) else "-"
+        
         is_rows.append({
-            '年度': str(d.year),
+            '年度': str(yr),
             f'營業收入 ({unit})': round(rev / divisor, 1),
             f'營業利益 ({unit})': round(op_inc / divisor, 1),
             'EPS (元)': round(eps, 2),
@@ -699,6 +737,7 @@ def run_pit_backtest_local(sym, target_date, is_finance, industry_name):
 # UI 介面
 # ==========================================
 st.title("V7.4 Eric Chi 估值模型 (真實市值極速版)")
+st.caption(f"🔧 伺服器狀態：清單載入 {len(df_all)} 筆，IS庫載入 {len(DB_IS)} 筆，BS庫 {len(DB_BS)} 筆")
 tab1, tab2, tab3, tab4, tab5 = st.tabs(["全產業掃描", "單股深度查詢", "真·時光機回測", "⏳ 時點回測×全產業掃描", "🔥 主題概念掃描"])
 cols_display = ['股票代碼', '名稱', '現價', '營收成長率', '預估EPS', '營業利益率', '淨利率',
                 'P/E (TTM)', 'P/B (Lag)', 'P/S (Lag)', 'EV/EBITDA', 'DCF/DDM合理價區間',
@@ -712,11 +751,19 @@ with tab1:
     if df_all.empty:
         st.error("❌ 找不到本地資料庫 (tw_stock_list.csv)。")
     else:
-        selected_inds = st.multiselect(
+        # 計算每個產業的股票數量，讓選項顯示如 "半導體業 (150檔)"
+        ind_counts = df_all['Industry'].value_counts()
+        ind_options = sorted([f"{i} ({ind_counts.get(i, 0)}檔)" for i in df_all['Industry'].unique() if pd.notna(i)])
+        default_opt = [opt for opt in ind_options if "半導體業" in opt]
+
+        selected_inds_raw = st.multiselect(
             "選擇掃描產業 (可多選):",
-            sorted([i for i in df_all['Industry'].unique()]),
-            default=["半導體業"]
+            ind_options,
+            default=default_opt
         )
+        
+        # 將 "半導體業 (150檔)" 還原回 "半導體業"，供後續過濾使用
+        selected_inds = [opt.split(' (')[0] for opt in selected_inds_raw]
         if st.button("執行產業掃描", type="primary") and selected_inds:
             pb = st.progress(0)
             status_text = st.empty()
@@ -738,7 +785,7 @@ with tab1:
                 # 精算每一檔的真實市值：最新收盤價 * 本地股本
                 caps = []
                 for t in tickers_list:
-                    clean_ticker = str(t).replace('.TW', '').replace('.TWO', '')
+                    clean_ticker = str(t).replace('.TWO', '').replace('.TW', '').replace('*', '').strip()
                     s_bs = DB_BS[
                         (DB_BS['stock_id'].astype(str) == clean_ticker) &
                         (DB_BS['type'].isin(['OrdinaryShare', 'CapitalStock', 'OrdinaryShare_per', 'CapitalStock_per']))
@@ -885,18 +932,34 @@ with tab1:
 # ==========================================
 # Tab 2. 單股深度查詢
 # ==========================================
+def resolve_ticker(sym_str, df_all):
+    sym = sym_str.strip().upper()
+    if sym.endswith('.TW') or sym.endswith('.TWO'):
+        return sym
+    
+    clean_sym = sym.replace('*', '')
+    if not df_all.empty:
+        match = df_all[df_all['Code'].astype(str).str.replace('*', '', regex=False) == clean_sym]
+        if not match.empty:
+            return match.iloc[0]['Ticker']
+            
+    # 如果本地清單沒抓到，智能判斷 .TW 或 .TWO
+    tw_sym = f"{clean_sym}.TW"
+    try:
+        # 用 history 測一下上市代碼存不存在
+        if not yf.Ticker(tw_sym).history(period="1d").empty:
+            return tw_sym
+    except:
+        pass
+    
+    return f"{clean_sym}.TWO"
+
 with tab2:
     c_in, c_out = st.columns([1, 2])
     with c_in:
         sym_input = st.text_input("輸入代碼:", value="2330")
         if st.button("查詢", type="primary"):
-            sym = sym_input.strip().upper()
-            if not sym.endswith('.TW') and not sym.endswith('.TWO'):
-                if not df_all.empty:
-                    match = df_all[df_all['Code'].astype(str) == str(sym)]
-                    sym = match.iloc[0]['Ticker'] if not match.empty else f"{sym}.TW"
-                else:
-                    sym = f"{sym}.TW"
+            sym = resolve_ticker(sym_input, df_all)
 
             with st.spinner(f"正在穿透防火牆解析 ({sym})..."):
                 try:
@@ -919,7 +982,11 @@ with tab2:
 
                     p_is, p_bs, p_cf = get_stock_financials(sym)
                     if p_is.empty:
-                        st.error("❌ 本地資料庫中找不到這檔股票的財報！")
+                        # DEBUG: Print the clean_ticker and actual matched rows info
+                        clean_ticker = str(sym).replace('.TWO', '').replace('.TW', '').replace('*', '').strip()
+                        if clean_ticker.endswith('.0'): clean_ticker = clean_ticker[:-2]
+                        is_match_count = len(DB_IS[DB_IS['stock_id'].astype(str).str.strip().str.replace('.0','', regex=False) == clean_ticker]) if not DB_IS.empty else 0
+                        st.error(f"❌ 本地資料庫中找不到這檔股票的財報！\n\n(Debug) Parsing sym '{sym}' -> clean '{clean_ticker}'. matched IS rows: {is_match_count}")
                     else:
                         ld = p_is.index[0]
                         # ✅ TTM EPS: 近四季加總
@@ -1008,6 +1075,16 @@ with tab2:
                                 use_container_width=True
                             )
                         
+                        # === 近三年財報摘要 (yfinance 即時版) ===
+                        st.divider()
+                        st.subheader("📊 關鍵財務數據 (來源: yfinance, 單位: 百萬台幣)")
+                        
+                        import sys
+                        import os
+                        script_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'My-TW-Coverage', 'My-TW-Coverage-master', 'scripts')
+                        if script_dir not in sys.path:
+                            sys.path.insert(0, script_dir)
+                            
                         # === 近三年財報摘要 ===
                         st.divider()
                         st.subheader("📊 近三年財報摘要 (年度累計)")
@@ -1037,7 +1114,7 @@ with tab2:
 
                         # === 主題標籤 ===
                         all_themes_map = load_all_themes("My-TW-Coverage")
-                        clean_code = str(sym).replace('.TW', '').replace('.TWO', '')
+                        clean_code = str(sym).replace('.TWO', '').replace('.TW', '').replace('*', '').strip()
                         stock_in_themes = {t: codes for t, codes in all_themes_map.items() if clean_code in codes}
                         if stock_in_themes:
                             st.divider()
@@ -1078,14 +1155,7 @@ with tab3:
         for sym in t_list_raw:
             if not sym:
                 continue
-            if not sym.endswith('.TW') and not sym.endswith('.TWO'):
-                if not df_all.empty:
-                    match = df_all[df_all['Code'].astype(str) == str(sym)]
-                    t_list.append(match.iloc[0]['Ticker'] if not match.empty else f"{sym}.TW")
-                else:
-                    t_list.append(f"{sym}.TW")
-            else:
-                t_list.append(sym)
+            t_list.append(resolve_ticker(sym, df_all))
 
         pb = st.progress(0)
         res_list = []
@@ -1387,7 +1457,7 @@ with tab5:
                     if scores5['Total'] < min_score_t5:
                         continue
 
-                    clean5  = str(sym5).replace('.TW', '').replace('.TWO', '')
+                    clean5  = str(sym5).replace('.TW', '').replace('.TWO', '').replace('*', '').strip()
                     op_rev5 = safe_val(p_is5, ld5, ['Revenue'])
                     raw_t5.append({
                         '股票代碼' : sym5,
