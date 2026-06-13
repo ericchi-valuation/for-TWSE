@@ -7,12 +7,18 @@ on:
     - cron: '0 16 10 * *' 
   workflow_dispatch: # 允許手動點擊執行
 
+# 授予 GITHUB_TOKEN 寫入權限，讓 git push 可以成功
+permissions:
+  contents: write
+
 jobs:
   update-revenue:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Python
         uses: actions/setup-python@v4
@@ -35,3 +41,14 @@ jobs:
           git add tw_monthly_rev.parquet tw_historical_mr.csv
           git commit -m "Auto-update monthly revenue [skip ci]" || echo "No changes to commit"
           git push
+
+      # 上傳更新後的檔案為 Artifact，方便手動下載（保留 7 天）
+      - name: Upload updated files as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: monthly-revenue-${{ github.run_id }}
+          path: |
+            tw_monthly_rev.parquet
+            tw_historical_mr.csv
+          retention-days: 7
