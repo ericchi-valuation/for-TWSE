@@ -14,8 +14,8 @@ API_TOKEN = os.getenv("FINMIND_TOKEN", "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJ
 api = DataLoader()
 api.login_by_token(api_token=API_TOKEN)
 
-# 設定增量更新的起點 (涵蓋 2024 Q4 與 2025 全年財報)
-START_DATE = "2024-11-01"
+# 設定增量更新的起點 (只抓 2026 Q2 季報)
+START_DATE = "2026-04-01"
 
 # 檔案路徑設定
 TEMP_IS = "temp_new_is.csv"

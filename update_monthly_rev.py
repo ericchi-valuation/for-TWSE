@@ -4,6 +4,14 @@ update_monthly_rev.py
 用途：從 FinMind 抓取全市場月營收（比季財報更新更快），
       建立 tw_monthly_rev.parquet，供 app.py 計算精確的累計年增率。
 執行頻率：建議每月底或每月 10 號後更新一次即可。
+
+【下載說明】
+  GitHub Actions 執行後，可在以下位置下載更新的檔案：
+  1. GitHub Actions → 對應 Workflow Run → Artifacts 區塊
+     → 下載 "monthly-revenue-<run_id>" 壓縮檔（保留 7 天）
+  2. 若 git push 成功，直接從 GitHub repo 下載最新版本：
+     https://raw.githubusercontent.com/<owner>/<repo>/main/tw_monthly_rev.parquet
+     https://raw.githubusercontent.com/<owner>/<repo>/main/tw_historical_mr.csv
 """
 
 import pandas as pd
@@ -105,5 +113,17 @@ if frames:
     # 清理暫存
     if os.path.exists(TEMP_FILE):
         os.remove(TEMP_FILE)
+
+    # 列印下載提示（在 GitHub Actions 環境中）
+    if os.getenv("GITHUB_ACTIONS"):
+        print("\n" + "="*60)
+        print("📥 【下載更新後的檔案】")
+        print("   方法 1：Actions 頁面 → 此次 Run → Artifacts 下載")
+        print(f"   保留期限：7 天")
+        repo = os.getenv("GITHUB_REPOSITORY", "your-owner/your-repo")
+        print(f"   方法 2（若 push 成功）：")
+        print(f"   https://github.com/{repo}/raw/main/{PARQ_FILE}")
+        print(f"   https://github.com/{repo}/raw/main/{HIST_FILE}")
+        print("="*60)
 else:
     print("⚠️ 沒有任何資料，請確認 API Token 有效。")
